@@ -46,6 +46,7 @@ class FileHeader {
   bool operator==(const FileHeader& h) const
   {
     return memcmp(&_header, &h._header, sizeof(_header)) == 0 &&
+           _has_flag_bits == h._has_flag_bits &&
            (!_has_flag_bits || memcmp(&_flag_bits, &h._flag_bits, sizeof(_flag_bits)) == 0);
   }
 

@@ -552,14 +552,14 @@ Logging::Logging(const uint8_t* msg, bool is_tagged) : _has_tag(is_tagged)
   if (is_tagged) {
     const ulog_message_logging_tagged_s* logging =
         reinterpret_cast<const ulog_message_logging_tagged_s*>(msg);
-    CHECK_MSG_SIZE(logging->msg_size, 12);
+    CHECK_MSG_SIZE(logging->msg_size, 11);
     log_level = logging->log_level;
     _tag = logging->tag;
     _timestamp = logging->timestamp;
     _message = std::string(logging->message, logging->msg_size - 11);
   } else {
     const ulog_message_logging_s* logging = reinterpret_cast<const ulog_message_logging_s*>(msg);
-    CHECK_MSG_SIZE(logging->msg_size, 10);
+    CHECK_MSG_SIZE(logging->msg_size, 9);
     log_level = logging->log_level;
     _timestamp = logging->timestamp;
     _message = std::string(logging->message, logging->msg_size - 9);
