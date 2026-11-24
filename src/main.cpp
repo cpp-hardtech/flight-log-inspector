@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <variant>
 
 #include <flight_log/data_container.hpp>
@@ -20,7 +21,54 @@
 
 namespace {
 
-int inspectLog(const char* path)
+class SummaryData : public flight_log::DataContainer {
+ public:
+  SummaryData() : DataContainer(StorageConfig::Header) {}
+
+  void data(const flight_log::Data& sample) override
+  {
+    DataContainer::data(sample);
+    ++_sample_counts[sample.msgId()];
+  }
+
+  void dropout(const flight_log::Dropout& item) override
+  {
+    ++_dropout_count;
+    _total_dropout_ms += item.durationMs();
+  }
+
+  uint64_t sampleCount(uint16_t message_id) const
+  {
+    const auto count = _sample_counts.find(message_id);
+    return count != _sample_counts.end() ? count->second : 0;
+  }
+
+  uint64_t dropoutCount() const { return _dropout_count; }
+  uint64_t totalDropoutMs() const { return _total_dropout_ms; }
+
+ private:
+  std::unordered_map<uint16_t, uint64_t> _sample_counts;
+  uint64_t _dropout_count{0};
+  uint64_t _total_dropout_ms{0};
+};
+
+void printDropouts(uint64_t count, uint64_t duration_ms)
+{
+  printf("Dropouts: %" PRIu64 ", total duration: %" PRIu64 " ms\n", count, duration_ms);
+}
+
+void printTopicCounts(flight_log::DataContainer& data, const SummaryData* summary = nullptr)
+{
+  printf("\nName (multi id)  - number of data points\n");
+  for (const auto& item : data.subscriptionsByNameAndMultiId()) {
+    const auto& subscription = *item.second;
+    const uint64_t count = summary ? summary->sampleCount(subscription.getAddLoggedMessage().msgId())
+                                   : subscription.size();
+    printf(" %s (%i)   -  %" PRIu64 "\n", item.first.name.c_str(), item.first.multi_id, count);
+  }
+}
+
+int inspectLog(const char* path, bool summary_only)
 {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -28,8 +76,10 @@ int inspectLog(const char* path)
     return 1;
   }
   std::array<uint8_t, 4096> buffer{};
+  const auto summary = summary_only ? std::make_shared<SummaryData>() : nullptr;
   const auto storage = flight_log::DataContainer::StorageConfig::FullLog;
-  const auto data_container = std::make_shared<flight_log::DataContainer>(storage);
+  const std::shared_ptr<flight_log::DataContainer> data_container =
+      summary ? summary : std::make_shared<flight_log::DataContainer>(storage);
   flight_log::Reader reader{data_container};
   do {
     file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
@@ -47,12 +97,18 @@ int inspectLog(const char* path)
     return 1;
   }
 
+  if (summary) {
+    printDropouts(summary->dropoutCount(), summary->totalDropoutMs());
+    printTopicCounts(*summary, summary.get());
+    return 0;
+  }
+
   // Dropouts
   const auto& dropouts = data_container->dropouts();
   const auto total_dropouts_ms = std::accumulate(
       dropouts.begin(), dropouts.end(), uint64_t{0},
       [](uint64_t sum, const flight_log::Dropout& curr) { return sum + curr.durationMs(); });
-  printf("Dropouts: %zu, total duration: %" PRIu64 " ms\n", dropouts.size(), total_dropouts_ms);
+  printDropouts(dropouts.size(), total_dropouts_ms);
 
   auto print_value = [](const std::string& name, const flight_log::Value& value) {
     std::visit(
@@ -85,13 +141,7 @@ int inspectLog(const char* path)
   }
   printf("\n");
 
-  // Messages
-  printf("\n");
-  printf("Name (multi id)  - number of data points\n");
-  for (const auto& item : data_container->subscriptionsByNameAndMultiId()) {
-    printf(" %s (%i)   -  %zu\n", item.first.name.c_str(), item.first.multi_id,
-           item.second->size());
-  }
+  printTopicCounts(*data_container);
 
   printf("Formats:\n");
   for (const auto& msg_format : data_container->messageFormats()) {
@@ -130,19 +180,21 @@ int inspectLog(const char* path)
 
 int main(int argc, char** argv)
 {
-  constexpr auto usage = "Usage: flight-log-inspector <file.ulg>\n";
+  constexpr auto usage = "Usage: flight-log-inspector [--summary-only] <file.ulg>\n";
   if (argc == 2 && std::string_view(argv[1]) == "--help") {
     std::fputs(usage, stdout);
     return 0;
   }
-  if (argc != 2) {
+  const bool summary_only = argc > 1 && std::string_view(argv[1]) == "--summary-only";
+  if (argc != (summary_only ? 3 : 2)) {
     std::fputs(usage, stderr);
     return 2;
   }
+  const auto path = argv[summary_only ? 2 : 1];
   try {
-    return inspectLog(argv[1]);
+    return inspectLog(path, summary_only);
   } catch (const std::exception& error) {
-    std::fprintf(stderr, "%s: %s\n", argv[1], error.what());
+    std::fprintf(stderr, "%s: %s\n", path, error.what());
     return 1;
   }
 }
