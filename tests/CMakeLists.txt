@@ -18,6 +18,11 @@ add_test(NAME cli-summary-only COMMAND ${CMAKE_COMMAND}
   -DLOG_DIR=${CMAKE_CURRENT_SOURCE_DIR}/log_files
   -P ${CMAKE_CURRENT_SOURCE_DIR}/check_summary_only.cmake
 )
+add_test(NAME cli-quality-check COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DLOG_DIR=${CMAKE_CURRENT_SOURCE_DIR}/log_files
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_quality.cmake
+)
 add_test(NAME cli-empty-input COMMAND ${CMAKE_COMMAND}
   -DCLI=$<TARGET_FILE:flight-log-inspector> -DARGUMENT=${empty_log}
   -DEXPECTED_STATUS=1 "-DEXPECTED_ERROR=Not enough data to read file magic"

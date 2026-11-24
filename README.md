@@ -43,9 +43,25 @@ may yield partial results.
 ```
 
 This mode scans the full log and prints each topic instance's sample count and the dropout totals.
-It keeps one sample counter per observed subscription and two counters for dropouts. Memory use
-also includes message formats, topic definitions, header metadata, parameter defaults, and
-parsing diagnostics.
+It keeps one sample counter per observed subscription and tracks dropout counts and durations.
+Memory use also includes message formats, topic definitions, header metadata, parameter
+defaults, and parsing diagnostics.
+
+## Check a recording in CI
+
+```sh
+./install/bin/flight-log-inspector check tests/log_files/sample_log_small.ulg \
+  --max-dropout-ms 30 --min-samples sensor_combined 1298
+```
+
+Set at least one limit. The dropout limit is inclusive and applies to the longest individual
+dropout. A recording with zero dropouts has a maximum of 0 ms. The sample minimum is also
+inclusive and requires the named topic instance to be present. Use `--instance N` with
+`--min-samples` to select an instance from 0 through 255. Instance 0 is the default.
+
+The command reports the observed value and configured threshold for each check. Exit status
+0 means all checks passed, 3 means a policy failed, 2 means invalid arguments, and 1 means the
+recording could not be checked due to a file or parsing error or warning.
 
 ## C++ library
 
