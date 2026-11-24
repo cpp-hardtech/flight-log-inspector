@@ -5,16 +5,34 @@
 
 #include <flight_log/simple_writer.hpp>
 
+#include <cerrno>
+#include <system_error>
+
 #ifdef _WIN32
-// clang-format off
-#include <windows.h>
-#include <fileapi.h>
-// clang-format on
+#include <io.h>
 #else
 #include <unistd.h>
 #endif
 
 namespace flight_log {
+
+namespace {
+
+[[noreturn]] void throwFileError(const char* operation, const std::string& filename, int error)
+{
+  const std::error_code code(error == 0 ? EIO : error, std::generic_category());
+  throw ParsingException(std::string("Failed to ") + operation + " '" + filename +
+                         "': " + code.message());
+}
+
+void checkFileStream(std::FILE* file, const std::string& filename)
+{
+  if (std::ferror(file)) {
+    throw ParsingException("Previous stream error writing '" + filename + "'");
+  }
+}
+
+}  // namespace
 
 const std::string SimpleWriter::kFormatNameRegexStr = "[a-zA-Z0-9_\\-/]+";
 const std::regex SimpleWriter::kFormatNameRegex = std::regex(std::string(kFormatNameRegexStr));
@@ -28,24 +46,23 @@ SimpleWriter::SimpleWriter(DataWriteCB data_write_cb, uint64_t timestamp_us)
 }
 
 SimpleWriter::SimpleWriter(const std::string& filename, uint64_t timestamp_us)
+    : _filename(filename), _file(std::fopen(filename.c_str(), "wb"), &std::fclose)
 {
-  _file = std::fopen(filename.c_str(), "wb");
   if (!_file) {
-    throw ParsingException("Failed to open file");
+    throwFileError("open", _filename, errno);
   }
 
-  _writer = std::make_unique<Writer>(
-      [this](const uint8_t* data, int length) { std::fwrite(data, 1, length, _file); });
+  _writer = std::make_unique<Writer>([this](const uint8_t* data, int length) {
+    const auto size = static_cast<size_t>(length);
+    checkFileStream(_file.get(), _filename);
+    if (std::fwrite(data, 1, size, _file.get()) != size || std::ferror(_file.get())) {
+      throwFileError("write", _filename, errno);
+    }
+  });
   _writer->fileHeader(FileHeader(timestamp_us));
 }
 
-SimpleWriter::~SimpleWriter()
-{
-  _writer.reset();
-  if (_file) {
-    std::fclose(_file);
-  }
-}
+SimpleWriter::~SimpleWriter() = default;
 
 void SimpleWriter::writeMessageFormat(const std::string& name, const std::vector<Field>& fields)
 {
@@ -113,13 +130,24 @@ void SimpleWriter::writeTextMessage(Logging::Level level, const std::string& mes
 
 void SimpleWriter::fsync()
 {
-  if (_file) {
-    fflush(_file);
+  if (!_file) {
+    return;
+  }
+  checkFileStream(_file.get(), _filename);
+  if (std::fflush(_file.get()) != 0) {
+    throwFileError("flush", _filename, errno);
+  }
+
 #ifdef _WIN32
-    FlushFileBuffers(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(_fileno(_file))));
+  const int result = _commit(_fileno(_file.get()));
 #else
-    ::fsync(fileno(_file));
+  int result;
+  do {
+    result = ::fsync(fileno(_file.get()));
+  } while (result != 0 && errno == EINTR);
 #endif
+  if (result != 0) {
+    throwFileError("sync", _filename, errno);
   }
 }
 uint16_t SimpleWriter::writeAddLoggedMessage(const std::string& message_format_name,

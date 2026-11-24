@@ -21,7 +21,8 @@ add_test(NAME cli-empty-input COMMAND ${CMAKE_COMMAND}
 
 if(FLIGHT_LOG_ENABLE_UNIT_TESTS)
   find_package(doctest CONFIG REQUIRED)
-  add_executable(flight_log_unit_tests main.cpp read_api_test.cpp ulog_parsing_test.cpp)
+  add_executable(flight_log_unit_tests main.cpp read_api_test.cpp ulog_parsing_test.cpp
+    writer_file_test.cpp)
   target_link_libraries(flight_log_unit_tests PRIVATE doctest::doctest flight_log::flight_log)
   add_test(NAME unit-tests COMMAND flight_log_unit_tests)
 endif()
