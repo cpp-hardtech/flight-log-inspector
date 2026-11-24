@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 #include <flight_log/data_container.hpp>
@@ -21,7 +22,23 @@
 
 namespace {
 
-int inspectLog(const char* path)
+class ParameterUpdateContainer final : public flight_log::DataContainer {
+ public:
+  ParameterUpdateContainer() : DataContainer(StorageConfig::Header) {}
+
+  void parameter(const flight_log::Parameter& parameter) override
+  {
+    if (!isHeaderComplete()) {
+      DataContainer::parameter(parameter);
+      return;
+    }
+    auto update = parameter;
+    update.field().resolveDefinition(messageFormats(), 0);
+    changedParametersRef().push_back(std::move(update));
+  }
+};
+
+int inspectLog(const char* path, bool parameter_changes)
 {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -29,8 +46,10 @@ int inspectLog(const char* path)
     return 1;
   }
   std::array<uint8_t, 4096> buffer{};
-  const auto storage = flight_log::DataContainer::StorageConfig::FullLog;
-  const auto data_container = std::make_shared<flight_log::DataContainer>(storage);
+  using DataContainer = flight_log::DataContainer;
+  const std::shared_ptr<DataContainer> data_container =
+      parameter_changes ? std::make_shared<ParameterUpdateContainer>()
+                        : std::make_shared<DataContainer>(DataContainer::StorageConfig::FullLog);
   flight_log::Reader reader{data_container};
   do {
     file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
@@ -47,13 +66,6 @@ int inspectLog(const char* path)
   if (data_container->hadFatalError()) {
     return 1;
   }
-
-  // Dropouts
-  const auto& dropouts = data_container->dropouts();
-  const auto total_dropouts_ms = std::accumulate(
-      dropouts.begin(), dropouts.end(), uint64_t{0},
-      [](uint64_t sum, const flight_log::Dropout& curr) { return sum + curr.durationMs(); });
-  printf("Dropouts: %zu, total duration: %" PRIu64 " ms\n", dropouts.size(), total_dropouts_ms);
 
   auto print_value = [](const std::string& name, const flight_log::Value& value) {
     std::visit(
@@ -74,6 +86,26 @@ int inspectLog(const char* path)
         },
         value.asNativeTypeVariant());
   };
+
+  if (parameter_changes) {
+    const auto& updates = data_container->changedParameters();
+    printf("Parameter updates: %zu\n", updates.size());
+    for (const auto& update : updates) {
+      print_value(update.field().name(), update.value());
+    }
+    if (std::fflush(stdout) != 0 || std::ferror(stdout)) {
+      std::fputs("Cannot write parameter updates\n", stderr);
+      return 1;
+    }
+    return 0;
+  }
+
+  // Dropouts
+  const auto& dropouts = data_container->dropouts();
+  const auto total_dropouts_ms = std::accumulate(
+      dropouts.begin(), dropouts.end(), uint64_t{0},
+      [](uint64_t sum, const flight_log::Dropout& curr) { return sum + curr.durationMs(); });
+  printf("Dropouts: %zu, total duration: %" PRIu64 " ms\n", dropouts.size(), total_dropouts_ms);
 
   // Info messages
   printf("Info Messages:\n");
@@ -132,19 +164,22 @@ int inspectLog(const char* path)
 
 int main(int argc, char** argv)
 {
-  constexpr auto usage = "Usage: flight-log-inspector <file.ulg>\n";
+  constexpr auto usage = "Usage: flight-log-inspector <file.ulg>\n"
+                         "       flight-log-inspector --parameter-changes <file.ulg>\n";
   if (argc == 2 && std::string_view(argv[1]) == "--help") {
     std::fputs(usage, stdout);
     return 0;
   }
-  if (argc != 2) {
+  const bool parameter_changes = argc > 1 && std::string_view(argv[1]) == "--parameter-changes";
+  if (argc != (parameter_changes ? 3 : 2)) {
     std::fputs(usage, stderr);
     return 2;
   }
+  const char* path = argv[parameter_changes ? 2 : 1];
   try {
-    return inspectLog(argv[1]);
+    return inspectLog(path, parameter_changes);
   } catch (const std::exception& error) {
-    std::fprintf(stderr, "%s: %s\n", argv[1], error.what());
+    std::fprintf(stderr, "%s: %s\n", path, error.what());
     return 1;
   }
 }

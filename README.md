@@ -36,6 +36,15 @@ nonzero exit status. The CLI keeps samples in memory while it builds the report.
 reader can process chunks incrementally for large logs. Logs with appended data segments
 may yield partial results.
 
+Use `--parameter-changes` to inspect parameter updates recorded during the flight:
+
+```sh
+./install/bin/flight-log-inspector --parameter-changes tests/log_files/sample.ulg
+```
+
+The report lists updates in recording order, including repeated values. The command keeps
+parameter updates and header information in memory while skipping storage of topic samples.
+
 ## C++ library
 
 Point `CMAKE_PREFIX_PATH` to the installation directory, then link the library in your project.
