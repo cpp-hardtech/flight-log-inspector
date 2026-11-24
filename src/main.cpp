@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <exception>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -65,7 +66,8 @@ int inspectLog(const char* path)
           } else if constexpr (std::is_same_v<T, uint32_t>) {
             printf(" %s: %u\n", name.c_str(), arg);
           } else if constexpr (std::is_same_v<T, float>) {
-            printf(" %s: %.3f\n", name.c_str(), static_cast<double>(arg));
+            printf(" %s: %.*g\n", name.c_str(), std::numeric_limits<float>::max_digits10,
+                   static_cast<double>(arg));
           } else {
             printf(" %s: <data>\n", name.c_str());
           }
