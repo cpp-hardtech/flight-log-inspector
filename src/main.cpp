@@ -257,7 +257,12 @@ int main(int argc, char** argv)
   }
   const char* path = argv[json ? 2 : 1];
   try {
-    return inspectLog(path, json);
+    const int status = inspectLog(path, json);
+    if (std::fflush(stdout) != 0 || std::ferror(stdout)) {
+      std::fprintf(stderr, "%s: Cannot write log report\n", path);
+      return 1;
+    }
+    return status;
   } catch (const std::exception& error) {
     if (json) {
       writeJsonReport(std::cout, nullptr, error.what());

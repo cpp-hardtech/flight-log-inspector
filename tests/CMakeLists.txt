@@ -34,6 +34,21 @@ add_test(NAME cli-json-empty-input COMMAND ${CMAKE_COMMAND}
   -P ${cli_tests}
 )
 
+if(EXISTS "/dev/full")
+  add_test(NAME cli-text-output-failure COMMAND ${CMAKE_COMMAND}
+    -DCLI=$<TARGET_FILE:flight-log-inspector>
+    -DARGUMENT=${CMAKE_CURRENT_SOURCE_DIR}/log_files/sample_log_small.ulg
+    -DOUTPUT_PATH=/dev/full -DEXPECTED_STATUS=1 "-DEXPECTED_ERROR=Cannot write log report"
+    -P ${cli_tests}
+  )
+  add_test(NAME cli-json-output-failure COMMAND ${CMAKE_COMMAND}
+    -DCLI=$<TARGET_FILE:flight-log-inspector> -DCLI_OPTION=--json
+    -DARGUMENT=${CMAKE_CURRENT_SOURCE_DIR}/log_files/sample_log_small.ulg
+    -DOUTPUT_PATH=/dev/full -DEXPECTED_STATUS=1 "-DEXPECTED_ERROR=Cannot write log report"
+    -P ${cli_tests}
+  )
+endif()
+
 if(FLIGHT_LOG_ENABLE_UNIT_TESTS)
   find_package(doctest CONFIG REQUIRED)
   add_executable(flight_log_unit_tests main.cpp read_api_test.cpp ulog_parsing_test.cpp)
