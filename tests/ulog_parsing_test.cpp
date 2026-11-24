@@ -1,0 +1,598 @@
+/****************************************************************************
+ * See NOTICE for the copyright declaration for this file.
+ * SPDX-License-Identifier: BSD-3-Clause
+ ****************************************************************************/
+#include <doctest/doctest.h>
+
+#include <filesystem>
+#include <flight_log/data_container.hpp>
+#include <flight_log/reader.hpp>
+#include <flight_log/simple_writer.hpp>
+#include <flight_log/writer.hpp>
+#include <vector>
+
+class TestWriter : public flight_log::Writer {
+ public:
+  explicit TestWriter(const flight_log::DataWriteCB& cb) : flight_log::Writer(cb) {}
+
+  ~TestWriter() override = default;
+
+  void error(const std::string& msg, bool is_recoverable) override { ++num_errors; }
+
+  int num_errors{0};
+
+ private:
+};
+
+TEST_SUITE_BEGIN("[ULog Parsing]");
+
+TEST_CASE("ULog parsing - basic test: write then read")
+{
+  std::vector<uint8_t> written_data;
+  TestWriter writer([&](const uint8_t* data, int length) {
+    const int prev_size = written_data.size();
+    written_data.resize(written_data.size() + length);
+    memcpy(written_data.data() + prev_size, data, length);
+  });
+
+  // Input data
+  const flight_log::FileHeader file_header{};
+  const flight_log::MessageFormat format1{"message_name",
+                                        {{"uint64_t", "timestamp"}, {"float", "float_value"}}};
+  const flight_log::MessageFormat format2{
+      "other_message", {{"uint64_t", "timestamp"}, {"uint32_t", "array", 3}, {"uint16_t", "x"}}};
+  std::vector<uint8_t> data_vector;
+  data_vector.resize(22);
+  data_vector[0] = 32;
+  data_vector[20] = 49;
+  const flight_log::MessageInfo info{"info", "test_value"};
+  const flight_log::Logging logging{flight_log::Logging::Level::Warning, "logging message", 3'834'732};
+  const uint16_t msg_id = 1;
+  const flight_log::AddLoggedMessage add_logged_message{0, msg_id, "other_message"};
+  const flight_log::Data data{msg_id, data_vector};
+
+  // Write data
+  writer.fileHeader(file_header);
+  writer.messageInfo(info);
+  writer.messageFormat(format1);
+  writer.messageFormat(format2);
+  writer.headerComplete();
+  writer.logging(logging);
+  writer.addLoggedMessage(add_logged_message);
+  writer.data(data);
+  writer.data(data);
+
+  REQUIRE_GT(written_data.size(), 0);
+  REQUIRE_EQ(writer.num_errors, 0);
+
+  // // Test: write to disk
+  // FILE* file = fopen("test.ulg", "wb");
+  // fwrite(written_data.data(), 1, written_data.size(), file);
+  // fclose(file);
+
+  // Read it
+  const auto data_container =
+      std::make_shared<flight_log::DataContainer>(flight_log::DataContainer::StorageConfig::FullLog);
+  flight_log::Reader reader{data_container};
+  reader.readChunk(written_data.data(), written_data.size());
+
+  // Check for errors
+  REQUIRE(data_container->parsingErrors().empty());
+  REQUIRE_FALSE(data_container->hadFatalError());
+
+  // Check RAW API
+  CHECK_EQ(file_header, data_container->fileHeader());
+  CHECK_EQ(format1, *(data_container->messageFormats().at("message_name")));
+  CHECK_EQ(format2, *(data_container->messageFormats().at("other_message")));
+  CHECK_EQ(info, data_container->messageInfo().at("info"));
+  REQUIRE_EQ(data_container->logging().size(), 1);
+  CHECK_EQ(logging, data_container->logging()[0]);
+  CHECK_EQ(data_container->subscriptionsByMessageId().at(msg_id)->rawSamples().size(), 2);
+  CHECK_EQ(data, data_container->subscriptionsByMessageId().at(msg_id)->rawSamples()[0]);
+  CHECK_EQ(data, data_container->subscriptionsByMessageId().at(msg_id)->rawSamples()[1]);
+
+  // Check convenience API
+  CHECK_EQ(format2, *(data_container->subscription("other_message")->format()));
+  CHECK_EQ(data_container->subscription("other_message")->size(), 2);
+
+  auto timestamp_field = data_container->subscription("other_message")->field("timestamp");
+  auto x_field = data_container->subscription("other_message")->field("x");
+
+  for (const auto& sample : *(data_container->subscription("other_message"))) {
+    // field access
+    CHECK_EQ(sample[timestamp_field].as<int>(), 32);
+    CHECK_EQ(sample[x_field].as<int>(), 49);
+    // direct string access
+    CHECK_EQ(sample["timestamp"].as<int>(), 32);
+    CHECK_EQ(sample["x"].as<int>(), 49);
+  }
+}
+
+namespace {
+void readFileWriteTest(const std::filesystem::path& path,
+                       const std::function<unsigned()>& next_chunk_size)
+{
+  FILE* file = fopen(path.c_str(), "rb");
+  CHECK(file);
+
+  std::vector<uint8_t> written_data;
+  auto writer = std::make_shared<TestWriter>([&](const uint8_t* data, int length) {
+    const int prev_size = written_data.size();
+    written_data.resize(written_data.size() + length);
+    memcpy(written_data.data() + prev_size, data, length);
+  });
+
+  std::vector<uint8_t> input_data;
+  uint8_t buffer[4096];
+  int bytes_read;
+  flight_log::Reader reader{writer};
+  while ((bytes_read =
+              fread(buffer, 1, std::min<unsigned>(next_chunk_size(), sizeof(buffer)), file)) > 0) {
+    input_data.resize(input_data.size() + bytes_read);
+    memcpy(input_data.data() + input_data.size() - bytes_read, buffer, bytes_read);
+    reader.readChunk(buffer, bytes_read);
+  }
+  fclose(file);
+
+  //   // Test: write to disk
+  //   FILE* file_test = fopen(path.filename().c_str(), "wb");
+  //   fwrite(written_data.data(), 1, written_data.size(), file_test);
+  //   fclose(file_test);
+
+  REQUIRE_GT(written_data.size(), 0);
+  REQUIRE_GT(input_data.size(), 0);
+  REQUIRE_EQ(writer->num_errors, 0);
+  CHECK_EQ(input_data.size(), written_data.size());
+  CHECK_EQ(input_data, written_data);
+}
+}  // namespace
+
+TEST_CASE("ULog parsing - read sample files then write")
+{
+  // Iterate over test log files
+  const std::string src_file_path = __FILE__;
+  const std::string test_file_dir =
+      src_file_path.substr(0, src_file_path.rfind('/')) + "/log_files";
+  printf("Log files dir: %s\n", test_file_dir.c_str());
+
+  bool found_logs = false;
+  bool test_min_chunk_size = true;
+  for (const auto& dir_entry : std::filesystem::directory_iterator(test_file_dir)) {
+    if (dir_entry.is_directory() || dir_entry.path().extension() != ".ulg") {
+      continue;
+    }
+    found_logs = true;
+    printf("Testing file %s\n", dir_entry.path().filename().string().c_str());
+
+    // Iterate over chunk sizes
+    const int first_chunk_size = 100;  // always include magic+flags messages in the first chunk
+    const int chunk_sizes[] = {1, 5, 1024, 4048};
+    for (const auto& chunk_size : chunk_sizes) {
+      if (!test_min_chunk_size && chunk_size <= 3) {
+        continue;
+      }
+      printf("Read chunk size: %i\n", chunk_size);
+      bool first = true;
+      readFileWriteTest(dir_entry, [&]() {
+        if (first) {
+          first = false;
+          return first_chunk_size;
+        }
+        return chunk_size;
+      });
+    }
+    test_min_chunk_size = false;  // only test small chunk size for first log, as it's slow
+  }
+
+  REQUIRE(found_logs);
+}
+
+TEST_CASE("ULog parsing - test corruption")
+{
+  // Corrupt the stream by inserting zero bytes
+  int insert_zero_bytes = 0;
+  std::vector<uint8_t> written_data;
+  TestWriter writer([&](const uint8_t* data, int length) {
+    if (insert_zero_bytes > 0) {
+      printf("inserting zero bytes, num written: %zu\n", written_data.size());
+      written_data.resize(written_data.size() + insert_zero_bytes);
+      insert_zero_bytes = 0;
+    }
+    const int prev_size = written_data.size();
+    written_data.resize(written_data.size() + length);
+    memcpy(written_data.data() + prev_size, data, length);
+  });
+
+  // Input data
+  const flight_log::FileHeader file_header{};
+  const flight_log::MessageFormat format2{
+      "other_message", {{"uint64_t", "timestamp"}, {"uint32_t", "array", 3}, {"uint16_t", "x"}}};
+  std::vector<uint8_t> data_vector;
+  data_vector.resize(22);
+  data_vector[0] = 32;
+  data_vector[20] = 49;
+  const flight_log::Logging logging{flight_log::Logging::Level::Warning, "logging message", 3'834'732};
+  const uint16_t msg_id = 1;
+  const flight_log::AddLoggedMessage add_logged_message{0, msg_id, "other_message"};
+  const flight_log::Data data{msg_id, data_vector};
+
+  // Write data
+  writer.fileHeader(file_header);
+  writer.messageFormat(format2);
+  writer.headerComplete();
+  insert_zero_bytes = 423;
+  writer.logging(logging);
+  writer.addLoggedMessage(add_logged_message);
+  writer.data(data);
+  writer.data(data);
+
+  REQUIRE_GT(written_data.size(), 0);
+  REQUIRE_EQ(writer.num_errors, 0);
+
+  // Read it
+  const auto data_container =
+      std::make_shared<flight_log::DataContainer>(flight_log::DataContainer::StorageConfig::FullLog);
+  flight_log::Reader reader{data_container};
+  // Read in multiple chunks, as the parser needs more readChunk calls to recover.
+  // We could change the parser to handle it, but in practice this should not be an issue.
+  const int last_chunk_size = 30;
+  reader.readChunk(written_data.data(), written_data.size() - last_chunk_size);
+  reader.readChunk(written_data.data() + written_data.size() - last_chunk_size, last_chunk_size);
+
+  // Expected to have errors
+  CHECK_GT(data_container->parsingErrors().size(), 0);
+  REQUIRE_FALSE(data_container->hadFatalError());
+
+  // Compare
+  CHECK_EQ(file_header, data_container->fileHeader());
+  CHECK_EQ(format2, *(data_container->messageFormats().at("other_message")));
+  // Here we inserted zero bytes, but the next messages should not be dropped
+  REQUIRE_EQ(data_container->logging().size(), 1);
+  CHECK_EQ(logging, data_container->logging()[0]);
+  CHECK_EQ(data_container->subscriptionsByMessageId().at(msg_id)->rawSamples().size(), 2);
+  CHECK_EQ(data, data_container->subscriptionsByMessageId().at(msg_id)->rawSamples()[0]);
+  CHECK_EQ(data, data_container->subscriptionsByMessageId().at(msg_id)->rawSamples()[1]);
+
+  auto timestamp_field = data_container->subscription("other_message")->field("timestamp");
+  auto x_field = data_container->subscription("other_message")->field("x");
+
+  for (const auto& sample : *(data_container->subscription("other_message"))) {
+    // field access
+    CHECK_EQ(sample[timestamp_field].as<int>(), 32);
+    CHECK_EQ(sample[x_field].as<int>(), 49);
+    // direct string access
+    CHECK_EQ(sample["timestamp"].as<int>(), 32);
+    CHECK_EQ(sample["x"].as<int>(), 49);
+  }
+}
+
+TEST_CASE("ULog parsing - corruption recovery rejects wrong-size data for a known msg_id")
+{
+  // Same technique as the "test corruption" case above, but instead of only inserting zero
+  // bytes, follow them with a fabricated Data message header: known msg_type, plausible
+  // msg_size, and even the SAME msg_id as a real subscription - but with a payload size that
+  // doesn't match that subscription's format. Before the isValidDataMessage() fix,
+  // tryToRecover() would accept this as a valid resync point purely because it looks
+  // superficially plausible, and it would end up stored as a corrupted sample. The fix must
+  // reject it and instead recover at the next genuine message.
+  std::vector<uint8_t> injected_bytes;
+  std::vector<uint8_t> written_data;
+  TestWriter writer([&](const uint8_t* data, int length) {
+    if (!injected_bytes.empty()) {
+      written_data.insert(written_data.end(), injected_bytes.begin(), injected_bytes.end());
+      injected_bytes.clear();
+    }
+    const int prev_size = written_data.size();
+    written_data.resize(written_data.size() + length);
+    memcpy(written_data.data() + prev_size, data, length);
+  });
+
+  // A tiny, unpadded format (8 + 4 = 12 bytes), so its on-wire size is unambiguous.
+  const flight_log::MessageFormat format{"target_message",
+                                       {{"uint64_t", "timestamp"}, {"float", "value"}}};
+  const uint16_t msg_id = 1;
+  const flight_log::AddLoggedMessage add_logged_message{0, msg_id, "target_message"};
+
+  auto make_data = [&](uint64_t timestamp, float value) {
+    std::vector<uint8_t> bytes(12);
+    memcpy(bytes.data(), &timestamp, sizeof(timestamp));
+    memcpy(bytes.data() + sizeof(timestamp), &value, sizeof(value));
+    return flight_log::Data{msg_id, bytes};
+  };
+  const auto data1 = make_data(100, 1.5F);
+  const auto data2 = make_data(200, 2.5F);
+
+  writer.fileHeader(flight_log::FileHeader{});
+  writer.messageFormat(format);
+  writer.headerComplete();
+  writer.addLoggedMessage(add_logged_message);
+  writer.data(data1);
+
+  // Zero run to trigger corruptionDetected(), followed by the fabricated candidate.
+  injected_bytes.resize(50, 0);
+  const uint16_t fake_payload_size = 20;                 // target_message's real payload size is 12
+  const uint16_t fake_msg_size = fake_payload_size + 2;  // + 2-byte msg_id
+  auto append_u16 = [&](uint16_t v) {
+    injected_bytes.push_back(static_cast<uint8_t>(v & 0xFF));
+    injected_bytes.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+  };
+  append_u16(fake_msg_size);
+  injected_bytes.push_back('D');  // ULogMessageType::DATA
+  append_u16(msg_id);             // the SAME msg_id as the real subscription above
+  // Fill the (wrong-size) payload with a byte value that can't be mistaken for any known
+  // msg_type character at any scan offset, so the search deterministically skips through it.
+  injected_bytes.resize(injected_bytes.size() + fake_payload_size, 0xAA);
+
+  writer.data(data2);  // flushes injected_bytes first, then the genuine next message
+
+  REQUIRE_GT(written_data.size(), 0);
+  REQUIRE_EQ(writer.num_errors, 0);
+
+  // Read it
+  const auto data_container =
+      std::make_shared<flight_log::DataContainer>(flight_log::DataContainer::StorageConfig::FullLog);
+  flight_log::Reader reader{data_container};
+  // As in the "test corruption" case above: if recovery completes with no remaining
+  // external bytes to process (length == 0 at the point tryToRecover's recursive
+  // readChunk() call runs), the just-recovered message stays buffered but unprocessed
+  // until a later readChunk() call with length > 0 flushes it - readChunk()'s main loop
+  // only runs while length > 0. So a second, small trailing call is needed here too.
+  const int last_chunk_size = 5;
+  reader.readChunk(written_data.data(), written_data.size() - last_chunk_size);
+  reader.readChunk(written_data.data() + written_data.size() - last_chunk_size, last_chunk_size);
+
+  // Expected to have errors, but not be fatal
+  CHECK_GT(data_container->parsingErrors().size(), 0);
+  REQUIRE_FALSE(data_container->hadFatalError());
+
+  // The fabricated wrong-size candidate must NOT have been accepted as a third sample.
+  const auto& samples = data_container->subscriptionsByMessageId().at(msg_id)->rawSamples();
+  REQUIRE_EQ(samples.size(), 2);
+  CHECK_EQ(data1, samples[0]);
+  CHECK_EQ(data2, samples[1]);
+}
+
+namespace {
+// Streaming consumer in Header storage mode (like a converter that writes each sample out
+// immediately). Records only the samples the base class accepted: if DataContainer::data()
+// throws, the exception propagates to the Reader, as it would in a real consumer.
+class HeaderModeCollector : public flight_log::DataContainer {
+ public:
+  HeaderModeCollector() : flight_log::DataContainer(flight_log::DataContainer::StorageConfig::Header) {}
+  void data(const flight_log::Data& data) override
+  {
+    flight_log::DataContainer::data(data);
+    accepted.push_back(data);
+  }
+  std::vector<flight_log::Data> accepted;
+};
+
+// Writes a file with one 12-byte "target_message" subscription: data1, then whatever
+// 'injected' holds (raw bytes), then data2.
+std::vector<uint8_t> writeFileWithInjectedBytes(const std::vector<uint8_t>& injected,
+                                                flight_log::Data& data1, flight_log::Data& data2)
+{
+  std::vector<uint8_t> injected_bytes;
+  std::vector<uint8_t> written_data;
+  TestWriter writer([&](const uint8_t* data, int length) {
+    if (!injected_bytes.empty()) {
+      written_data.insert(written_data.end(), injected_bytes.begin(), injected_bytes.end());
+      injected_bytes.clear();
+    }
+    const int prev_size = written_data.size();
+    written_data.resize(written_data.size() + length);
+    memcpy(written_data.data() + prev_size, data, length);
+  });
+
+  const flight_log::MessageFormat format{"target_message",
+                                       {{"uint64_t", "timestamp"}, {"float", "value"}}};
+  const uint16_t msg_id = 1;
+  auto make_data = [&](uint64_t timestamp, float value) {
+    std::vector<uint8_t> bytes(12);
+    memcpy(bytes.data(), &timestamp, sizeof(timestamp));
+    memcpy(bytes.data() + sizeof(timestamp), &value, sizeof(value));
+    return flight_log::Data{msg_id, bytes};
+  };
+  data1 = make_data(100, 1.5F);
+  data2 = make_data(200, 2.5F);
+
+  writer.fileHeader(flight_log::FileHeader{});
+  writer.messageFormat(format);
+  writer.headerComplete();
+  writer.addLoggedMessage(flight_log::AddLoggedMessage{0, msg_id, "target_message"});
+  writer.data(data1);
+  injected_bytes = injected;
+  writer.data(data2);  // flushes injected_bytes first
+  REQUIRE_EQ(writer.num_errors, 0);
+  return written_data;
+}
+
+// A Data message header for msg_id 1 with a payload of 'payload_size' bytes of 0xAA.
+std::vector<uint8_t> fabricatedDataMessage(uint16_t payload_size)
+{
+  std::vector<uint8_t> bytes;
+  const uint16_t msg_size = payload_size + 2;  // + 2-byte msg_id
+  bytes.push_back(static_cast<uint8_t>(msg_size & 0xFF));
+  bytes.push_back(static_cast<uint8_t>(msg_size >> 8));
+  bytes.push_back('D');
+  bytes.push_back(1);
+  bytes.push_back(0);
+  bytes.resize(bytes.size() + payload_size, 0xAA);
+  return bytes;
+}
+
+void readInTwoChunks(flight_log::Reader& reader, std::vector<uint8_t>& written_data)
+{
+  // See the corruption tests above for why a small trailing chunk is needed after recovery.
+  const int last_chunk_size = 5;
+  reader.readChunk(written_data.data(), written_data.size() - last_chunk_size);
+  reader.readChunk(written_data.data() + written_data.size() - last_chunk_size, last_chunk_size);
+}
+}  // namespace
+
+TEST_CASE("ULog parsing - Header storage mode recovers on the next genuine data message")
+{
+  // Zero run between two valid samples. Header mode doesn't create subscriptions, so before
+  // the fix isValidDataMessage() rejected every DATA candidate and recovery skipped past all
+  // following data messages (data2 was lost).
+  flight_log::Data data1{0, {}};
+  flight_log::Data data2{0, {}};
+  auto written_data = writeFileWithInjectedBytes(std::vector<uint8_t>(50, 0), data1, data2);
+
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+  readInTwoChunks(reader, written_data);
+
+  CHECK_GT(collector->parsingErrors().size(), 0);
+  REQUIRE_FALSE(collector->hadFatalError());
+  REQUIRE_EQ(collector->accepted.size(), 2);
+  CHECK_EQ(data1, collector->accepted[0]);
+  CHECK_EQ(data2, collector->accepted[1]);
+}
+
+TEST_CASE("ULog parsing - Header storage mode rejects wrong-size data for a known msg_id")
+{
+  // A well-framed Data message for the known msg_id, but with a 20-byte payload where the
+  // format needs 12. No zero run, so this is parsed in the normal path (not recovery). Before
+  // the fix, Header mode skipped the size check and the consumer received it.
+  flight_log::Data data1{0, {}};
+  flight_log::Data data2{0, {}};
+  auto written_data = writeFileWithInjectedBytes(fabricatedDataMessage(20), data1, data2);
+
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+  readInTwoChunks(reader, written_data);
+
+  CHECK_GT(collector->parsingErrors().size(), 0);
+  REQUIRE_FALSE(collector->hadFatalError());
+  REQUIRE_EQ(collector->accepted.size(), 2);
+  CHECK_EQ(data1, collector->accepted[0]);
+  CHECK_EQ(data2, collector->accepted[1]);
+}
+
+struct MyData {
+  uint64_t timestamp;
+  float debug_array[4];
+  float cpuload;
+  float temperature;
+  int8_t counter;
+
+  bool operator==(const MyData& other) const
+  {
+    for (unsigned i = 0; i < sizeof(debug_array) / sizeof(debug_array[0]); ++i) {
+      if (debug_array[i] != other.debug_array[i]) {
+        return false;
+      }
+    }
+    return timestamp == other.timestamp && cpuload == other.cpuload &&
+           temperature == other.temperature && counter == other.counter;
+  }
+
+  static std::string messageName() { return "my_data"; }
+
+  static std::vector<flight_log::Field> fields()
+  {
+    // clang-format off
+    return {
+        {"uint64_t", "timestamp"},
+        {"float", "debug_array", 4},
+        {"float", "cpuload"},
+        {"float", "temperature"},
+        {"int8_t", "counter"},
+    };  // clang-format on
+  }
+};
+
+TEST_CASE("ULog parsing - simple writer")
+{
+  std::vector<uint8_t> written_data;
+  flight_log::SimpleWriter writer(
+      [&](const uint8_t* data, int length) {
+        const int prev_size = written_data.size();
+        written_data.resize(written_data.size() + length);
+        memcpy(written_data.data() + prev_size, data, length);
+      },
+      0);
+
+  const std::string sys_name = "ULogExampleWriter";
+  writer.writeInfo("sys_name", sys_name);
+
+  const float param_a = 382.23F;
+  const int32_t param_b = 8272;
+  writer.writeParameter("PARAM_A", param_a);
+  writer.writeParameter("PARAM_B", param_b);
+
+  CHECK_THROWS(writer.writeMessageFormat("invalid_require_padding", {
+                                                                        {"uint64_t", "timestamp"},
+                                                                        {"int8_t", "a"},
+                                                                        {"float", "b"},
+                                                                    }));
+
+  CHECK_THROWS(
+      writer.writeMessageFormat("invalid_type", {{"uint64_t", "timestamp"}, {"my_type", "a"}}));
+
+  CHECK_THROWS(writer.writeMessageFormat("invalid_no_timestamp", {{"int8_t", "a"}}));
+
+  CHECK_THROWS(writer.writeMessageFormat("invalid_field_name",
+                                         {{"uint64_t", "timestamp"}, {"int8_t", "a/b"}}));
+
+  writer.writeMessageFormat(MyData::messageName(), MyData::fields());
+  writer.headerComplete();
+
+  const uint16_t my_data_msg_id = writer.writeAddLoggedMessage(MyData::messageName());
+
+  const std::string text_message = "Hello world";
+  writer.writeTextMessage(flight_log::Logging::Level::Info, text_message, 0);
+
+  // Write some messages
+  float cpuload = 25.423F;
+  std::vector<MyData> written_data_messages;
+  for (int i = 0; i < 100; ++i) {
+    MyData data{};
+    data.timestamp = static_cast<uint64_t>(i) * 1000;
+    data.cpuload = cpuload;
+    data.counter = i;
+    writer.writeData(my_data_msg_id, data);
+    written_data_messages.push_back(data);
+    cpuload -= 0.424F;
+  }
+
+  // Parse data
+  const auto data_container =
+      std::make_shared<flight_log::DataContainer>(flight_log::DataContainer::StorageConfig::FullLog);
+  flight_log::Reader reader{data_container};
+  reader.readChunk(written_data.data(), written_data.size());
+
+  // Check for errors
+  REQUIRE(data_container->parsingErrors().empty());
+  REQUIRE_FALSE(data_container->hadFatalError());
+
+  // Compare
+  CHECK_EQ(sys_name, data_container->messageInfo().at("sys_name").value().as<std::string>());
+  REQUIRE_EQ(data_container->logging().size(), 1);
+  CHECK_EQ(text_message, data_container->logging()[0].message());
+  CHECK_EQ(param_a, data_container->initialParameters().at("PARAM_A").value().as<float>());
+  CHECK_EQ(param_b, (data_container->initialParameters().at("PARAM_B").value().as<int32_t>()));
+
+  CHECK_EQ(MyData::messageName(),
+           data_container->messageFormats().at(MyData::messageName())->name());
+  REQUIRE_EQ(data_container->subscriptionNames().size(), 1);
+
+  const auto subscription = data_container->subscription(MyData::messageName());
+  REQUIRE_EQ(subscription->size(), written_data_messages.size());
+  for (size_t i = 0; i < subscription->size(); ++i) {
+    const auto& sample = (*subscription)[i];
+    const auto& gt = written_data_messages[i];
+    MyData memcopied_sample{};
+    REQUIRE_GE(sizeof(MyData), sample.rawData().size());
+    // check raw byte equality
+    memcpy(&memcopied_sample, sample.rawData().data(), sample.rawData().size());
+    CHECK_EQ(gt, memcopied_sample);
+    // check API access field equality
+    CHECK_EQ(gt.timestamp, sample["timestamp"].as<uint64_t>());
+    CHECK_EQ(gt.cpuload, sample["cpuload"].as<float>());
+    CHECK_EQ(gt.counter, sample["counter"].as<int8_t>());
+  }
+}
+
+TEST_SUITE_END();
