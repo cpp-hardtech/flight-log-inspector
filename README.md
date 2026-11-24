@@ -33,7 +33,8 @@ The CLI, library, and default CLI tests build without external dependencies. Set
 In the topic listing, `sensor_combined (0)   -  1298` means instance 0 has 1,298 samples.
 Parsing warnings go to standard error. A fatal parse error or an unreadable file produces a
 nonzero exit status. The CLI keeps samples in memory while it builds the report. The C++
-reader can process chunks incrementally for large logs. Logs with appended data segments
+reader can process chunks incrementally for large logs. Call `Reader::finish()` after the last
+chunk to report incomplete input. Logs with appended data segments
 may yield partial results.
 
 ## C++ library

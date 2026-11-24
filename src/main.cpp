@@ -38,6 +38,9 @@ int inspectLog(const char* path)
       return 1;
     }
     reader.readChunk(buffer.data(), static_cast<int>(file.gcount()));
+    if (file.eof()) {
+      reader.finish();
+    }
   } while (file && !data_container->hadFatalError());
 
   for (const auto& parsing_error : data_container->parsingErrors()) {
