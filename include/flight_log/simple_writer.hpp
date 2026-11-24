@@ -30,7 +30,9 @@ class SimpleWriter {
  public:
   /**
    * Constructor with a callback for writing data.
-   * @param data_write_cb callback for serialized ULog data
+   * @param data_write_cb callback for serialized ULog chunks. A record may use multiple calls.
+   * If the callback throws after writing any bytes of a record, restore the output to the
+   * previous record boundary before retrying.
    * @param timestamp_us start timestamp [us]
    */
   explicit SimpleWriter(DataWriteCB data_write_cb, uint64_t timestamp_us);
