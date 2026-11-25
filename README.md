@@ -32,7 +32,7 @@ The CLI, library, and default CLI tests build without external dependencies. Set
 
 In the topic listing, `sensor_combined (0)   -  1298` means instance 0 has 1,298 samples.
 Parsing warnings go to standard error. A fatal parse error or an unreadable file produces a
-nonzero exit status. The CLI keeps samples in memory while it builds the report. The C++
+nonzero exit status. The full report keeps samples in memory while it scans the log. The C++
 reader can process chunks incrementally for large logs. Call `Reader::finish()` after the last
 chunk to report incomplete input. Logs with appended data segments
 may yield partial results.
@@ -64,6 +64,17 @@ Use `diff-params` to compare the configuration recorded at the start of each fli
 added and removed parameters, value changes, and type changes in parameter-name order. It
 compares values as stored and prints floating-point values with round-trip precision. A
 successful comparison exits with status 0 whether or not there are differences.
+
+## Summary for large logs
+
+```sh
+./install/bin/flight-log-inspector --summary-only tests/log_files/sample.ulg
+```
+
+This mode scans the full log and prints each topic instance's sample count and the dropout totals.
+It keeps one sample counter per observed subscription and two counters for dropouts. Memory use
+also includes message formats, topic definitions, header metadata, parameter defaults, and
+parsing diagnostics.
 
 ## C++ library
 

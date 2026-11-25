@@ -18,6 +18,11 @@ add_test(NAME cli-summary COMMAND ${CMAKE_COMMAND}
   -DEXPECTED_STATUS=0 "-DEXPECTED_OUTPUT=sensor_combined (0)   -  1298"
   -P ${cli_tests}
 )
+add_test(NAME cli-summary-only COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DLOG_DIR=${CMAKE_CURRENT_SOURCE_DIR}/log_files
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_summary_only.cmake
+)
 add_test(NAME cli-float-precision COMMAND ${CMAKE_COMMAND}
   -DCLI=$<TARGET_FILE:flight-log-inspector>
   -DARGUMENT=${CMAKE_CURRENT_SOURCE_DIR}/log_files/sample_log_small.ulg

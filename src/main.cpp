@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -27,6 +28,53 @@
 #include <flight_log/reader.hpp>
 
 namespace {
+
+class SummaryData : public flight_log::DataContainer {
+ public:
+  SummaryData() : DataContainer(StorageConfig::Header) {}
+
+  void data(const flight_log::Data& sample) override
+  {
+    DataContainer::data(sample);
+    ++_sample_counts[sample.msgId()];
+  }
+
+  void dropout(const flight_log::Dropout& item) override
+  {
+    ++_dropout_count;
+    _total_dropout_ms += item.durationMs();
+  }
+
+  uint64_t sampleCount(uint16_t message_id) const
+  {
+    const auto count = _sample_counts.find(message_id);
+    return count != _sample_counts.end() ? count->second : 0;
+  }
+
+  uint64_t dropoutCount() const { return _dropout_count; }
+  uint64_t totalDropoutMs() const { return _total_dropout_ms; }
+
+ private:
+  std::unordered_map<uint16_t, uint64_t> _sample_counts;
+  uint64_t _dropout_count{0};
+  uint64_t _total_dropout_ms{0};
+};
+
+void printDropouts(uint64_t count, uint64_t duration_ms)
+{
+  printf("Dropouts: %" PRIu64 ", total duration: %" PRIu64 " ms\n", count, duration_ms);
+}
+
+void printTopicCounts(flight_log::DataContainer& data, const SummaryData* summary = nullptr)
+{
+  printf("\nName (multi id)  - number of data points\n");
+  for (const auto& item : data.subscriptionsByNameAndMultiId()) {
+    const auto& subscription = *item.second;
+    const uint64_t count = summary ? summary->sampleCount(subscription.getAddLoggedMessage().msgId())
+                                   : subscription.size();
+    printf(" %s (%i)   -  %" PRIu64 "\n", item.first.name.c_str(), item.first.multi_id, count);
+  }
+}
 
 uint64_t totalDropoutDuration(const flight_log::DataContainer& data)
 {
@@ -160,8 +208,8 @@ class ParameterUpdateContainer final : public flight_log::DataContainer {
   }
 };
 
-std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConfig storage,
-                                                  bool json = false, bool parameter_changes = false)
+std::shared_ptr<flight_log::DataContainer> readLog(
+    const char* path, const std::shared_ptr<flight_log::DataContainer>& data_container, bool json)
 {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -169,9 +217,6 @@ std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConf
     return nullptr;
   }
   std::array<uint8_t, 4096> buffer{};
-  const std::shared_ptr<flight_log::DataContainer> data_container =
-      parameter_changes ? std::make_shared<ParameterUpdateContainer>()
-                        : std::make_shared<flight_log::DataContainer>(storage);
   flight_log::Reader reader{data_container};
   do {
     file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
@@ -196,6 +241,12 @@ std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConf
     return nullptr;
   }
   return data_container;
+}
+
+std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConfig storage,
+                                                  bool json = false)
+{
+  return readLog(path, std::make_shared<flight_log::DataContainer>(storage), json);
 }
 
 template <typename T>
@@ -287,15 +338,29 @@ int compareParameters(const char* before_path, const char* after_path)
   return 0;
 }
 
-int inspectLog(const char* path, bool json, bool parameter_changes)
+int inspectLog(const char* path, bool json, bool summary_only, bool parameter_changes)
 {
-  const auto data_container = readLog(path, StorageConfig::FullLog, json, parameter_changes);
+  const auto summary = summary_only ? std::make_shared<SummaryData>() : nullptr;
+  std::shared_ptr<flight_log::DataContainer> data_container;
+  if (summary) {
+    data_container = readLog(path, summary, false);
+  } else if (parameter_changes) {
+    data_container = readLog(path, std::make_shared<ParameterUpdateContainer>(), false);
+  } else {
+    data_container = readLog(path, StorageConfig::FullLog, json);
+  }
   if (!data_container) {
     return 1;
   }
   if (json) {
     writeJsonReport(std::cout, data_container.get());
     return data_container->hadFatalError() ? 1 : 0;
+  }
+
+  if (summary) {
+    printDropouts(summary->dropoutCount(), summary->totalDropoutMs());
+    printTopicCounts(*summary, summary.get());
+    return 0;
   }
 
   auto print_value = [](const std::string& name, const flight_log::Value& value) {
@@ -350,13 +415,7 @@ int inspectLog(const char* path, bool json, bool parameter_changes)
   }
   printf("\n");
 
-  // Messages
-  printf("\n");
-  printf("Name (multi id)  - number of data points\n");
-  for (const auto& item : data_container->subscriptionsByNameAndMultiId()) {
-    printf(" %s (%i)   -  %zu\n", item.first.name.c_str(), item.first.multi_id,
-           item.second->size());
-  }
+  printTopicCounts(*data_container);
 
   printf("Formats:\n");
   for (const auto& msg_format : data_container->messageFormats()) {
@@ -551,7 +610,7 @@ int exportTopic(const char* path, const char* topic, const ExportOptions& option
 
 int main(int argc, char** argv)
 {
-  constexpr auto usage = "Usage: flight-log-inspector [--json] <file.ulg>\n"
+  constexpr auto usage = "Usage: flight-log-inspector [--json|--summary-only] <file.ulg>\n"
                          "       flight-log-inspector --parameter-changes <file.ulg>\n"
                          "       flight-log-inspector export-topic <file.ulg> <topic>\n"
                          "         [--instance N] [--start-us N] [--end-us N]\n"
@@ -590,14 +649,15 @@ int main(int argc, char** argv)
   }
   const bool json = argc > 1 && std::string_view(argv[1]) == "--json";
   const bool parameter_changes = argc > 1 && std::string_view(argv[1]) == "--parameter-changes";
-  const bool has_mode = json || parameter_changes;
+  const bool summary_only = argc > 1 && std::string_view(argv[1]) == "--summary-only";
+  const bool has_mode = json || parameter_changes || summary_only;
   if (argc != (has_mode ? 3 : 2)) {
     std::fputs(usage, stderr);
     return 2;
   }
   const char* path = argv[has_mode ? 2 : 1];
   try {
-    const int status = inspectLog(path, json, parameter_changes);
+    const int status = inspectLog(path, json, summary_only, parameter_changes);
     if (std::fflush(stdout) != 0 || std::ferror(stdout)) {
       std::fprintf(stderr, "%s: Cannot write %s\n", path,
                    parameter_changes ? "parameter updates" : "log report");
