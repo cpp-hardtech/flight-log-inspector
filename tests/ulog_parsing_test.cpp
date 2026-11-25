@@ -26,6 +26,66 @@ class TestWriter : public flight_log::Writer {
 
 TEST_SUITE_BEGIN("[ULog Parsing]");
 
+TEST_CASE("ULog header equality includes the presence of a flag record")
+{
+  const flight_log::FileHeader with_flags(42, true);
+  const flight_log::FileHeader legacy(with_flags.header());
+  const flight_log::FileHeader legacy_copy(with_flags.header());
+  const flight_log::FileHeader flags_copy(with_flags.header(), with_flags.flagBits());
+
+  CHECK_FALSE(legacy == with_flags);
+  CHECK_FALSE(with_flags == legacy);
+  CHECK(legacy == legacy_copy);
+  CHECK(with_flags == flags_copy);
+}
+
+TEST_CASE("ULog reads empty text messages written by SimpleWriter")
+{
+  std::vector<uint8_t> records;
+  flight_log::SimpleWriter writer([&records](const uint8_t* chunk, int size) {
+    records.insert(records.end(), chunk, chunk + size);
+  }, 42);
+  writer.headerComplete();
+  writer.writeTextMessage(flight_log::Logging::Level::Info, "", 100);
+  writer.writeTextMessage(flight_log::Logging::Level::Info, "ready", 101);
+
+  auto data = std::make_shared<flight_log::DataContainer>(
+      flight_log::DataContainer::StorageConfig::FullLog);
+  flight_log::Reader reader(data);
+  reader.readChunk(records.data(), static_cast<int>(records.size()));
+
+  CHECK(data->parsingErrors().empty());
+  REQUIRE(data->logging().size() == 2);
+  CHECK(data->logging()[0].timestamp() == 100);
+  CHECK(data->logging()[0].message().empty());
+  CHECK(data->logging()[1].timestamp() == 101);
+  CHECK(data->logging()[1].message() == "ready");
+}
+
+TEST_CASE("ULog retains a dropout before the first logged topic or text message")
+{
+  std::vector<uint8_t> records;
+  flight_log::Writer writer([&records](const uint8_t* chunk, int size) {
+    records.insert(records.end(), chunk, chunk + size);
+  });
+  writer.fileHeader(flight_log::FileHeader(42));
+  writer.headerComplete();
+  writer.dropout(flight_log::Dropout(15));
+  writer.logging(flight_log::Logging(flight_log::Logging::Level::Info, "ready", 101));
+
+  auto data = std::make_shared<flight_log::DataContainer>(
+      flight_log::DataContainer::StorageConfig::FullLog);
+  flight_log::Reader reader(data);
+  reader.readChunk(records.data(), static_cast<int>(records.size()));
+
+  CHECK(data->isHeaderComplete());
+  CHECK(data->parsingErrors().empty());
+  REQUIRE(data->dropouts().size() == 1);
+  CHECK(data->dropouts()[0].durationMs() == 15);
+  REQUIRE(data->logging().size() == 1);
+  CHECK(data->logging()[0].message() == "ready");
+}
+
 TEST_CASE("ULog parsing - basic test: write then read")
 {
   std::vector<uint8_t> written_data;
