@@ -1,4 +1,8 @@
-execute_process(COMMAND "${CLI}" "${ARGUMENT}"
+set(options)
+if(DEFINED CLI_OPTION)
+  list(APPEND options "${CLI_OPTION}")
+endif()
+execute_process(COMMAND "${CLI}" ${options} "${ARGUMENT}"
   RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error
 )
 
@@ -11,6 +15,10 @@ if(DEFINED EXPECTED_OUTPUT)
   if(output_index EQUAL -1)
     message(FATAL_ERROR "Output did not contain '${EXPECTED_OUTPUT}'")
   endif()
+endif()
+
+if(EXPECT_QUIET_STDERR AND NOT error STREQUAL "")
+  message(FATAL_ERROR "Unexpected error output\n${error}")
 endif()
 
 if(DEFINED EXPECTED_ERROR)

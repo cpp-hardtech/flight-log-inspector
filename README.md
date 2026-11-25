@@ -36,6 +36,14 @@ nonzero exit status. The CLI keeps samples in memory while it builds the report.
 reader can process chunks incrementally for large logs. Logs with appended data segments
 may yield partial results.
 
+Add `--json` before the path to produce one machine-readable diagnostics report.
+Schema version 1 reports `status`, parsing `diagnostics`, `dropouts` with a
+count and total duration in milliseconds, and `topics` with each name, instance
+and sample count. Status is `ok` for a log accepted without diagnostics,
+`warning` for recoverable parsing problems, and `error` for an unreadable log
+or fatal parsing failure. Both successful statuses exit with code 0. Errors
+still produce a JSON report and exit with code 1.
+
 ## C++ library
 
 Point `CMAKE_PREFIX_PATH` to the installation directory, then link the library in your project.
