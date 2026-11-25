@@ -233,11 +233,7 @@ TEST_CASE("ULog parsing - test corruption")
   const auto data_container =
       std::make_shared<flight_log::DataContainer>(flight_log::DataContainer::StorageConfig::FullLog);
   flight_log::Reader reader{data_container};
-  // Read in multiple chunks, as the parser needs more readChunk calls to recover.
-  // We could change the parser to handle it, but in practice this should not be an issue.
-  const int last_chunk_size = 30;
-  reader.readChunk(written_data.data(), written_data.size() - last_chunk_size);
-  reader.readChunk(written_data.data() + written_data.size() - last_chunk_size, last_chunk_size);
+  reader.readChunk(written_data.data(), written_data.size());
 
   // Expected to have errors
   CHECK_GT(data_container->parsingErrors().size(), 0);
@@ -332,14 +328,7 @@ TEST_CASE("ULog parsing - corruption recovery rejects wrong-size data for a know
   const auto data_container =
       std::make_shared<flight_log::DataContainer>(flight_log::DataContainer::StorageConfig::FullLog);
   flight_log::Reader reader{data_container};
-  // As in the "test corruption" case above: if recovery completes with no remaining
-  // external bytes to process (length == 0 at the point tryToRecover's recursive
-  // readChunk() call runs), the just-recovered message stays buffered but unprocessed
-  // until a later readChunk() call with length > 0 flushes it - readChunk()'s main loop
-  // only runs while length > 0. So a second, small trailing call is needed here too.
-  const int last_chunk_size = 5;
-  reader.readChunk(written_data.data(), written_data.size() - last_chunk_size);
-  reader.readChunk(written_data.data() + written_data.size() - last_chunk_size, last_chunk_size);
+  reader.readChunk(written_data.data(), written_data.size());
 
   // Expected to have errors, but not be fatal
   CHECK_GT(data_container->parsingErrors().size(), 0);
@@ -421,14 +410,209 @@ std::vector<uint8_t> fabricatedDataMessage(uint16_t payload_size)
   return bytes;
 }
 
-void readInTwoChunks(flight_log::Reader& reader, std::vector<uint8_t>& written_data)
-{
-  // See the corruption tests above for why a small trailing chunk is needed after recovery.
-  const int last_chunk_size = 5;
-  reader.readChunk(written_data.data(), written_data.size() - last_chunk_size);
-  reader.readChunk(written_data.data() + written_data.size() - last_chunk_size, last_chunk_size);
-}
 }  // namespace
+
+TEST_CASE("ULog parsing - file magic can span chunks")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  const auto bytes = writeFileWithInjectedBytes({}, first, second);
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+
+  const int split = 7;
+  CAPTURE(split);
+  reader.readChunk(bytes.data(), split);
+  CHECK(collector->parsingErrors().empty());
+  reader.readChunk(bytes.data() + split, bytes.size() - split);
+  CHECK_FALSE(collector->hadFatalError());
+  REQUIRE_EQ(collector->accepted.size(), 2);
+  CHECK_EQ(collector->accepted[1], second);
+}
+
+TEST_CASE("ULog parsing - flag bits can span chunks")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  const auto bytes = writeFileWithInjectedBytes({}, first, second);
+
+  const int flag_end = sizeof(flight_log::ulog_file_header_s) +
+                       sizeof(flight_log::ulog_message_flag_bits_s);
+  for (const int split : {17, 19, flag_end - 1}) {
+    const auto collector = std::make_shared<HeaderModeCollector>();
+    flight_log::Reader reader{collector};
+    CAPTURE(split);
+    reader.readChunk(bytes.data(), split);
+    CHECK(collector->parsingErrors().empty());
+    reader.readChunk(bytes.data() + split, bytes.size() - split);
+    CHECK_FALSE(collector->hadFatalError());
+    CHECK_EQ(collector->fileHeader().flagBits().msg_size, 40);
+    CHECK_EQ(collector->accepted.size(), 2);
+  }
+}
+
+TEST_CASE("ULog parsing - short legacy log without flag bits")
+{
+  std::vector<uint8_t> bytes;
+  TestWriter writer([&](const uint8_t* data, int length) {
+    bytes.insert(bytes.end(), data, data + length);
+  });
+  const flight_log::FileHeader header{123};
+  const flight_log::Logging logging{flight_log::Logging::Level::Warning, "legacy", 321};
+  writer.fileHeader(flight_log::FileHeader{header.header()});
+  writer.headerComplete();
+  writer.logging(logging);
+
+  const auto container =
+      std::make_shared<flight_log::DataContainer>(flight_log::DataContainer::StorageConfig::FullLog);
+  flight_log::Reader reader{container};
+  CAPTURE(bytes.size());
+  reader.readChunk(bytes.data(), bytes.size());
+  CHECK(container->parsingErrors().empty());
+  CHECK_FALSE(container->hadFatalError());
+  CHECK_EQ(container->fileHeader().header().timestamp, 123);
+  REQUIRE_EQ(container->logging().size(), 1);
+  CHECK_EQ(container->logging()[0], logging);
+}
+
+TEST_CASE("ULog parsing - extended flag bits can span chunks")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  auto bytes = writeFileWithInjectedBytes({}, first, second);
+  const int flag_start = sizeof(flight_log::ulog_file_header_s);
+  const int flag_end = flag_start + sizeof(flight_log::ulog_message_flag_bits_s);
+  const int extension_size = 20;
+  bytes[flag_start] += extension_size;
+  bytes.insert(bytes.begin() + flag_end, extension_size, 0);
+
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+  const int split = flag_end + 6;
+  CAPTURE(split);
+  CAPTURE(extension_size);
+  reader.readChunk(bytes.data(), split);
+  reader.readChunk(bytes.data() + split, bytes.size() - split);
+  CHECK(collector->parsingErrors().empty());
+  CHECK_FALSE(collector->hadFatalError());
+  CHECK_EQ(collector->fileHeader().flagBits().msg_size, 60);
+  REQUIRE_EQ(collector->accepted.size(), 2);
+  CHECK_EQ(collector->accepted[1], second);
+}
+
+TEST_CASE("ULog parsing - short flag record fails before consuming following messages")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  auto bytes = writeFileWithInjectedBytes({}, first, second);
+  const int flag_start = sizeof(flight_log::ulog_file_header_s);
+  const int flag_end = flag_start + sizeof(flight_log::ulog_message_flag_bits_s);
+  bytes[flag_start] = 39;
+  bytes.erase(bytes.begin() + flag_end - 1);
+
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+  CAPTURE(flag_start);
+  CAPTURE(bytes[flag_start]);
+  reader.readChunk(bytes.data(), bytes.size());
+  CHECK(collector->hadFatalError());
+  CHECK(collector->accepted.empty());
+}
+
+TEST_CASE("ULog parsing - recovered messages are delivered before the chunk returns")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  const auto bytes = writeFileWithInjectedBytes(std::vector<uint8_t>(50, 0), first, second);
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+
+  CAPTURE(bytes.size());
+  reader.readChunk(bytes.data(), bytes.size());
+  CHECK_EQ(collector->parsingErrors().size(), 1);
+  CHECK_FALSE(collector->hadFatalError());
+  REQUIRE_EQ(collector->accepted.size(), 2);
+  CHECK_EQ(collector->accepted[0], first);
+  CHECK_EQ(collector->accepted[1], second);
+}
+
+TEST_CASE("ULog parsing - recovery preserves a DATA candidate with a split message ID")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  const auto bytes = writeFileWithInjectedBytes(std::vector<uint8_t>(50, 0), first, second);
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+
+  const auto candidate_offset = bytes.size() - (ULOG_MSG_HEADER_LEN + sizeof(uint16_t) + 12);
+  const auto split = candidate_offset + ULOG_MSG_HEADER_LEN + 1;
+  CAPTURE(candidate_offset);
+  CAPTURE(split);
+  reader.readChunk(bytes.data(), split);
+  CHECK_EQ(collector->parsingErrors().size(), 1);
+  CHECK_EQ(collector->accepted.size(), 1);
+  reader.readChunk(bytes.data() + split, bytes.size() - split - 1);
+  CHECK_EQ(collector->accepted.size(), 1);
+  reader.readChunk(bytes.data() + bytes.size() - 1, 1);
+  CHECK_FALSE(collector->hadFatalError());
+  REQUIRE_EQ(collector->accepted.size(), 2);
+  CHECK_EQ(collector->accepted[1], second);
+}
+
+TEST_CASE("ULog parsing - finishing rejects incomplete file magic")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  const auto bytes = writeFileWithInjectedBytes({}, first, second);
+  for (int size = 0; size < static_cast<int>(sizeof(flight_log::ulog_file_header_s)); ++size) {
+    const auto collector = std::make_shared<HeaderModeCollector>();
+    flight_log::Reader reader{collector};
+    CAPTURE(size);
+    reader.readChunk(bytes.data(), size);
+    CHECK(collector->parsingErrors().empty());
+    reader.finish();
+    CHECK(collector->hadFatalError());
+    CHECK_EQ(collector->parsingErrors().size(), 1);
+  }
+}
+
+TEST_CASE("ULog parsing - finishing rejects an incomplete flag record")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  const auto bytes = writeFileWithInjectedBytes({}, first, second);
+  const int size = sizeof(flight_log::ulog_file_header_s) +
+                   sizeof(flight_log::ulog_message_flag_bits_s) - 1;
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+
+  CAPTURE(size);
+  reader.readChunk(bytes.data(), size);
+  CHECK(collector->parsingErrors().empty());
+  reader.finish();
+  CHECK(collector->hadFatalError());
+  CHECK_EQ(collector->parsingErrors().size(), 1);
+}
+
+TEST_CASE("ULog parsing - finishing reports and discards an incomplete final sample")
+{
+  flight_log::Data first{0, {}};
+  flight_log::Data second{0, {}};
+  const auto bytes = writeFileWithInjectedBytes({}, first, second);
+  const auto collector = std::make_shared<HeaderModeCollector>();
+  flight_log::Reader reader{collector};
+
+  const auto size = bytes.size() - 1;
+  CAPTURE(size);
+  reader.readChunk(bytes.data(), size);
+  CHECK(collector->parsingErrors().empty());
+  reader.finish();
+  reader.finish();
+  CHECK_FALSE(collector->hadFatalError());
+  CHECK_EQ(collector->parsingErrors().size(), 1);
+  REQUIRE_EQ(collector->accepted.size(), 1);
+  CHECK_EQ(collector->accepted.front(), first);
+}
 
 TEST_CASE("ULog parsing - Header storage mode recovers on the next genuine data message")
 {
@@ -441,7 +625,7 @@ TEST_CASE("ULog parsing - Header storage mode recovers on the next genuine data 
 
   const auto collector = std::make_shared<HeaderModeCollector>();
   flight_log::Reader reader{collector};
-  readInTwoChunks(reader, written_data);
+  reader.readChunk(written_data.data(), written_data.size());
 
   CHECK_GT(collector->parsingErrors().size(), 0);
   REQUIRE_FALSE(collector->hadFatalError());
@@ -461,7 +645,7 @@ TEST_CASE("ULog parsing - Header storage mode rejects wrong-size data for a know
 
   const auto collector = std::make_shared<HeaderModeCollector>();
   flight_log::Reader reader{collector};
-  readInTwoChunks(reader, written_data);
+  reader.readChunk(written_data.data(), written_data.size());
 
   CHECK_GT(collector->parsingErrors().size(), 0);
   REQUIRE_FALSE(collector->hadFatalError());

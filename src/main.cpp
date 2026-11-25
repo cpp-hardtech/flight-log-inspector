@@ -151,6 +151,9 @@ int inspectLog(const char* path, bool json)
       return reportInputError("Cannot read log", path, json);
     }
     reader.readChunk(buffer.data(), static_cast<int>(file.gcount()));
+    if (file.eof()) {
+      reader.finish();
+    }
   } while (file && !data_container->hadFatalError());
 
   if (json) {

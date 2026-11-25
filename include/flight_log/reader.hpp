@@ -26,16 +26,22 @@ class Reader {
    */
   void readChunk(const uint8_t* data, int length);
 
+  /**
+   * Signal the end of the input, reporting an incomplete file header or final message.
+   * Further reads and repeated calls to finish() are ignored.
+   */
+  void finish();
+
  private:
   static constexpr int kBufferSizeInit = 2048;
 
   static const std::set<ULogMessageType> kKnownMessageTypes;
 
-  int readMagic(const uint8_t* data, int length);
-  int readFlagBits(const uint8_t* data, int length);
+  void readMagic(const ulog_file_header_s& header);
+  void readFlagBits(const ulog_message_flag_bits_s& flag_bits);
   void corruptionDetected();
   int appendToPartialBuffer(const uint8_t* data, int length);
-  void tryToRecover(const uint8_t* data, int length);
+  void tryToRecover(const uint8_t*& data, int& length);
 
   void readHeaderMessage(const uint8_t* message);
   void readDataMessage(const uint8_t* message);
@@ -46,13 +52,13 @@ class Reader {
     ReadHeader,
     ReadData,
     InvalidData,
+    Finished,
   };
 
   State _state{State::ReadMagic};
   const std::shared_ptr<DataHandlerInterface> _data_handler_interface;
 
-  uint8_t* _partial_message_buffer{nullptr};  ///< contains at most one ULog message (unless
-                                              ///< _need_recovery==true)
+  uint8_t* _partial_message_buffer{nullptr};  ///< buffers incomplete input and recovery bytes
   int _partial_message_buffer_length_capacity{0};
   int _partial_message_buffer_length{0};
 
