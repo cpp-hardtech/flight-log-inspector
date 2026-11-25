@@ -46,6 +46,11 @@ void DataContainer::headerComplete()
     auto& parameter_value = it.second;
     parameter_value.field().resolveDefinition(_message_formats, 0);
   }
+  for (auto& category : _default_parameters_by_type) {
+    for (auto& parameter : category.second) {
+      parameter.second.field().resolveDefinition(_message_formats, 0);
+    }
+  }
 
   for (auto& it : _initial_parameters) {
     auto& parameter_value = it.second;
@@ -115,7 +120,15 @@ void DataContainer::parameterDefault(const ParameterDefault& parameter_default_a
     // if header is already complete, we can resolve definition here
     parameter_default.field().resolveDefinition(_message_formats, 0);
   }
-  _default_parameters.insert({parameter_default.field().name(), parameter_default});
+  const auto& name = parameter_default.field().name();
+  _default_parameters.insert({name, parameter_default});
+  const auto flags = static_cast<uint8_t>(parameter_default.defaultType());
+  for (unsigned bit = 1; bit <= flags; bit <<= 1) {
+    if ((flags & bit) != 0) {
+      const auto category = static_cast<ulog_parameter_default_type_t>(bit);
+      _default_parameters_by_type[category].insert_or_assign(name, parameter_default);
+    }
+  }
 }
 void DataContainer::addLoggedMessage(const AddLoggedMessage& add_logged_message)
 {
