@@ -373,6 +373,7 @@ void Reader::readHeaderMessage(const uint8_t* message)
     case ULogMessageType::ADD_LOGGED_MSG:
     case ULogMessageType::LOGGING:
     case ULogMessageType::LOGGING_TAGGED:
+    case ULogMessageType::DROPOUT:
       DBG_PRINTF("%i: Header completed\n", _total_num_read);
       _state = State::ReadData;
       _data_handler_interface->headerComplete();
