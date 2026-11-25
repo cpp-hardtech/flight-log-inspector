@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -195,6 +196,95 @@ std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConf
     return nullptr;
   }
   return data_container;
+}
+
+template <typename T>
+void writeParameterScalar(std::ostream& output, T value)
+{
+  if constexpr (std::is_floating_point_v<T>) {
+    output << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+  } else if constexpr (std::is_integral_v<T>) {
+    output << flight_log::staticCastEnsureUnsignedChar<decltype(+value)>(value);
+  } else {
+    output << value;
+  }
+}
+
+std::string describeParameter(const flight_log::Parameter& parameter)
+{
+  const auto& field = parameter.field();
+  std::ostringstream description;
+  description << field.type().name;
+  if (field.arrayLength() >= 0) {
+    description << '[' << field.arrayLength() << ']';
+  }
+  description << ' ';
+  std::visit(
+      [&description](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (flight_log::is_vector<T>::value) {
+          description << '[';
+          for (std::size_t i = 0; i < value.size(); ++i) {
+            if (i != 0) {
+              description << ", ";
+            }
+            writeParameterScalar(description, value[i]);
+          }
+          description << ']';
+        } else {
+          writeParameterScalar(description, value);
+        }
+      },
+      parameter.value().asNativeTypeVariant());
+  return description.str();
+}
+
+int compareParameters(const char* before_path, const char* after_path)
+{
+  const auto before_log = readLog(before_path, StorageConfig::Header);
+  if (!before_log) {
+    return 1;
+  }
+  const auto after_log = readLog(after_path, StorageConfig::Header);
+  if (!after_log) {
+    return 1;
+  }
+
+  const auto& before = before_log->initialParameters();
+  const auto& after = after_log->initialParameters();
+  auto old_param = before.begin();
+  auto new_param = after.begin();
+  bool changed = false;
+  while (old_param != before.end() || new_param != after.end()) {
+    if (new_param == after.end() ||
+        (old_param != before.end() && old_param->first < new_param->first)) {
+      printf("removed %s: %s\n", old_param->first.c_str(),
+             describeParameter(old_param->second).c_str());
+      ++old_param;
+      changed = true;
+    } else if (old_param == before.end() || new_param->first < old_param->first) {
+      printf("added %s: %s\n", new_param->first.c_str(),
+             describeParameter(new_param->second).c_str());
+      ++new_param;
+      changed = true;
+    } else {
+      const auto& old_value = old_param->second;
+      const auto& new_value = new_param->second;
+      const bool same_type = old_value.field() == new_value.field();
+      if (!same_type || old_value.valueRaw() != new_value.valueRaw()) {
+        printf("%s %s: %s -> %s\n", same_type ? "changed" : "type-changed",
+               old_param->first.c_str(), describeParameter(old_value).c_str(),
+               describeParameter(new_value).c_str());
+        changed = true;
+      }
+      ++old_param;
+      ++new_param;
+    }
+  }
+  if (!changed) {
+    std::puts("No initial parameter differences.");
+  }
+  return 0;
 }
 
 int inspectLog(const char* path, bool json, bool parameter_changes)
@@ -464,10 +554,23 @@ int main(int argc, char** argv)
   constexpr auto usage = "Usage: flight-log-inspector [--json] <file.ulg>\n"
                          "       flight-log-inspector --parameter-changes <file.ulg>\n"
                          "       flight-log-inspector export-topic <file.ulg> <topic>\n"
-                         "         [--instance N] [--start-us N] [--end-us N]\n";
+                         "         [--instance N] [--start-us N] [--end-us N]\n"
+                         "       flight-log-inspector diff-params <before.ulg> <after.ulg>\n";
   if (argc == 2 && std::string_view(argv[1]) == "--help") {
     std::fputs(usage, stdout);
     return 0;
+  }
+  if (argc > 2 && std::string_view(argv[1]) == "diff-params") {
+    if (argc != 4) {
+      std::fputs(usage, stderr);
+      return 2;
+    }
+    try {
+      return compareParameters(argv[2], argv[3]);
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "diff-params: %s\n", error.what());
+      return 1;
+    }
   }
   if (argc > 2 && std::string_view(argv[1]) == "export-topic") {
     if (argc < 4 || (argc - 4) % 2 != 0) {

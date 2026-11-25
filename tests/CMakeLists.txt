@@ -73,6 +73,12 @@ if(FLIGHT_LOG_ENABLE_UNIT_TESTS)
   add_test(NAME unit-tests COMMAND flight_log_unit_tests)
 endif()
 
+add_test(NAME cli-diff-params COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DLOG_DIR=${CMAKE_CURRENT_SOURCE_DIR}/log_files
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_diff_params.cmake
+)
+
 set(scalar_info_expected [=[Info Messages:
  byte_value: 255
  precise_value: 1.0000000000000002

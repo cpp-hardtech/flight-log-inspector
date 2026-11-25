@@ -54,6 +54,17 @@ Use `--parameter-changes` to inspect parameter updates recorded during the fligh
 The report lists updates in recording order, including repeated values. The command keeps
 parameter updates and header information in memory while skipping storage of topic samples.
 
+## Compare initial parameters
+
+```sh
+./install/bin/flight-log-inspector diff-params before.ulg after.ulg
+```
+
+Use `diff-params` to compare the configuration recorded at the start of each flight. It lists
+added and removed parameters, value changes, and type changes in parameter-name order. It
+compares values as stored and prints floating-point values with round-trip precision. A
+successful comparison exits with status 0 whether or not there are differences.
+
 ## C++ library
 
 Point `CMAKE_PREFIX_PATH` to the installation directory, then link the library in your project.
