@@ -107,7 +107,12 @@ void SimpleWriter::writeMessageFormat(const std::string& name, const std::vector
     message_size += array_size * basic_type_iter->second.size;
   }
   _formats[name] = Format{message_size};
-  _writer->messageFormat(MessageFormat(name, fields));
+  try {
+    _writer->messageFormat(MessageFormat(name, fields));
+  } catch (...) {
+    _formats.erase(name);
+    throw;
+  }
 }
 
 void SimpleWriter::headerComplete()
@@ -162,7 +167,12 @@ uint16_t SimpleWriter::writeAddLoggedMessage(const std::string& message_format_n
     throw UsageException("Format not found: " + message_format_name);
   }
   _subscriptions.push_back({format_iter->second.message_size});
-  _writer->addLoggedMessage(AddLoggedMessage(multi_id, msg_id, message_format_name));
+  try {
+    _writer->addLoggedMessage(AddLoggedMessage(multi_id, msg_id, message_format_name));
+  } catch (...) {
+    _subscriptions.pop_back();
+    throw;
+  }
   return msg_id;
 }
 

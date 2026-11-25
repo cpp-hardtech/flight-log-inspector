@@ -9,6 +9,7 @@
 #include <flight_log/reader.hpp>
 #include <flight_log/simple_writer.hpp>
 #include <flight_log/writer.hpp>
+#include <stdexcept>
 #include <vector>
 
 class TestWriter : public flight_log::Writer {
@@ -837,6 +838,105 @@ TEST_CASE("ULog parsing - simple writer")
     CHECK_EQ(gt.cpuload, sample["cpuload"].as<float>());
     CHECK_EQ(gt.counter, sample["counter"].as<int8_t>());
   }
+}
+
+namespace {
+
+struct RecordSink {
+  std::vector<uint8_t> bytes;
+  bool reject_next_write{false};
+
+  void write(const uint8_t* data, int length)
+  {
+    if (reject_next_write) {
+      reject_next_write = false;
+      throw std::runtime_error("record was not accepted by the sink");
+    }
+    bytes.insert(bytes.end(), data, data + length);
+  }
+
+  std::shared_ptr<flight_log::DataContainer> readLog() const
+  {
+    auto log = std::make_shared<flight_log::DataContainer>(
+        flight_log::DataContainer::StorageConfig::FullLog);
+    flight_log::Reader reader{log};
+    reader.readChunk(bytes.data(), bytes.size());
+    return log;
+  }
+};
+
+}  // namespace
+
+TEST_CASE("simple writer retries a format rejected by its output callback")
+{
+  RecordSink sink;
+  flight_log::SimpleWriter writer(
+      [&](const uint8_t* data, int length) { sink.write(data, length); }, 0);
+  writer.writeInfo("source", "format-retry");
+
+  const std::vector<flight_log::Field> fields{{"uint64_t", "timestamp"}};
+  const auto before = sink.bytes.size();
+  sink.reject_next_write = true;
+  CHECK_THROWS_AS(writer.writeMessageFormat("sample", fields), std::runtime_error);
+  CHECK_EQ(sink.bytes.size(), before);
+
+  std::string retry_error;
+  try {
+    writer.writeMessageFormat("sample", fields);
+  } catch (const flight_log::ExceptionBase& failure) {
+    retry_error = failure.what();
+  }
+  MESSAGE("format rejected at byte ", before, "; after retry=", sink.bytes.size(),
+          " error=", retry_error);
+  REQUIRE(retry_error.empty());
+  writer.headerComplete();
+  const uint16_t id = writer.writeAddLoggedMessage("sample");
+  writer.writeData(id, uint64_t{100});
+
+  const auto log = sink.readLog();
+  REQUIRE(log->parsingErrors().empty());
+  REQUIRE_EQ(log->messageFormats().size(), 1);
+  CHECK_EQ(log->messageInfo().at("source").value().as<std::string>(), "format-retry");
+  const auto subscription = log->subscription("sample");
+  REQUIRE_EQ(subscription->size(), 1);
+  CHECK_EQ((*subscription)[0]["timestamp"].as<uint64_t>(), 100);
+}
+
+TEST_CASE("simple writer does not expose a subscription rejected by its output callback")
+{
+  RecordSink sink;
+  flight_log::SimpleWriter writer(
+      [&](const uint8_t* data, int length) { sink.write(data, length); }, 0);
+  writer.writeMessageFormat("sample", {{"uint64_t", "timestamp"}});
+  writer.headerComplete();
+
+  const auto before = sink.bytes.size();
+  sink.reject_next_write = true;
+  CHECK_THROWS_AS(writer.writeAddLoggedMessage("sample"), std::runtime_error);
+  CHECK_EQ(sink.bytes.size(), before);
+
+  // Keep the sink armed so an incorrectly admitted sample cannot add bytes.
+  sink.reject_next_write = true;
+  CHECK_THROWS_AS(writer.writeData(0, uint64_t{50}), flight_log::UsageException);
+  const bool blocked_before_callback = sink.reject_next_write;
+  sink.reject_next_write = false;
+  CHECK_EQ(sink.bytes.size(), before);
+
+  const uint16_t id = writer.writeAddLoggedMessage("sample");
+  MESSAGE("subscription rejected at byte ", before, "; unissued ID blocked before callback=",
+          blocked_before_callback, "; retried subscription ID=", id);
+  CHECK(blocked_before_callback);
+  CHECK_EQ(id, 0);
+  writer.writeData(id, uint64_t{100});
+  writer.writeData(id, uint64_t{200});
+
+  const auto log = sink.readLog();
+  REQUIRE(log->parsingErrors().empty());
+  REQUIRE_EQ(log->subscriptionNames().size(), 1);
+  const auto subscription = log->subscription("sample");
+  REQUIRE_EQ(subscription->size(), 2);
+  CHECK_EQ((*subscription)[0]["timestamp"].as<uint64_t>(), 100);
+  CHECK_EQ((*subscription)[1]["timestamp"].as<uint64_t>(), 200);
 }
 
 TEST_SUITE_END();
