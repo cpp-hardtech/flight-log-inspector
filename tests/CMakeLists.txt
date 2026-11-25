@@ -72,3 +72,24 @@ if(FLIGHT_LOG_ENABLE_UNIT_TESTS)
   target_link_libraries(flight_log_unit_tests PRIVATE doctest::doctest flight_log::flight_log)
   add_test(NAME unit-tests COMMAND flight_log_unit_tests)
 endif()
+
+set(scalar_info_expected [=[Info Messages:
+ byte_value: 255
+ precise_value: 1.0000000000000002
+ raw_bytes: <data>
+ signed_narrow: -8
+ signed_short: -1600
+ signed_wide: -9007199254740993
+ site: test
+ unsigned_narrow: 250
+ unsigned_short: 65000
+ unsigned_wide: 18446744073709551615
+ valid: true
+ warning: false
+]=])
+add_test(NAME cli-scalar-info COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DARGUMENT=${CMAKE_CURRENT_SOURCE_DIR}/log_files/scalar_info.ulg
+  -DEXPECTED_STATUS=0 "-DEXPECTED_OUTPUT=${scalar_info_expected}"
+  -P ${cli_tests}
+)

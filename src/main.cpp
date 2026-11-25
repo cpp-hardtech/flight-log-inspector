@@ -214,10 +214,17 @@ int inspectLog(const char* path, bool json, bool parameter_changes)
           using T = std::decay_t<decltype(arg)>;
           if constexpr (std::is_same_v<T, std::string>) {
             printf(" %s: %s\n", name.c_str(), arg.c_str());
-          } else if constexpr (std::is_same_v<T, int32_t>) {
-            printf(" %s: %i\n", name.c_str(), arg);
-          } else if constexpr (std::is_same_v<T, uint32_t>) {
-            printf(" %s: %u\n", name.c_str(), arg);
+          } else if constexpr (std::is_same_v<T, bool>) {
+            printf(" %s: %s\n", name.c_str(), arg ? "true" : "false");
+          } else if constexpr (std::is_same_v<T, char>) {
+            printf(" %s: %u\n", name.c_str(),
+                   static_cast<unsigned int>(static_cast<unsigned char>(arg)));
+          } else if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+            printf(" %s: %" PRId64 "\n", name.c_str(), static_cast<int64_t>(arg));
+          } else if constexpr (std::is_integral_v<T>) {
+            printf(" %s: %" PRIu64 "\n", name.c_str(), static_cast<uint64_t>(arg));
+          } else if constexpr (std::is_same_v<T, double>) {
+            printf(" %s: %.*g\n", name.c_str(), std::numeric_limits<double>::max_digits10, arg);
           } else if constexpr (std::is_same_v<T, float>) {
             printf(" %s: %.*g\n", name.c_str(), std::numeric_limits<float>::max_digits10,
                    static_cast<double>(arg));
