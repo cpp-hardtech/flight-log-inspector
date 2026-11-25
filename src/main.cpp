@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  ****************************************************************************/
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cinttypes>
@@ -15,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -43,6 +45,7 @@ class SummaryData : public flight_log::DataContainer {
   {
     ++_dropout_count;
     _total_dropout_ms += item.durationMs();
+    _max_dropout_ms = std::max(_max_dropout_ms, uint64_t{item.durationMs()});
   }
 
   uint64_t sampleCount(uint16_t message_id) const
@@ -53,12 +56,59 @@ class SummaryData : public flight_log::DataContainer {
 
   uint64_t dropoutCount() const { return _dropout_count; }
   uint64_t totalDropoutMs() const { return _total_dropout_ms; }
+  uint64_t maxDropoutMs() const { return _max_dropout_ms; }
 
  private:
   std::unordered_map<uint16_t, uint64_t> _sample_counts;
   uint64_t _dropout_count{0};
   uint64_t _total_dropout_ms{0};
+  uint64_t _max_dropout_ms{0};
 };
+
+struct QualityPolicy {
+  std::optional<uint64_t> max_dropout_ms;
+  std::optional<uint64_t> min_samples;
+  std::string topic;
+  std::optional<int> instance;
+};
+
+std::optional<QualityPolicy> parseQualityPolicy(int argc, char** argv)
+{
+  QualityPolicy policy;
+  for (int i = 3; i < argc;) {
+    const std::string_view option = argv[i++];
+    if (option == "--min-samples") {
+      if (i == argc || argv[i][0] == '\0') {
+        return std::nullopt;
+      }
+      policy.topic = argv[i++];
+    }
+    if (i == argc) {
+      return std::nullopt;
+    }
+    const std::string_view text = argv[i++];
+    const auto end = text.data() + text.size();
+    uint64_t number = 0;
+    const auto parsed = std::from_chars(text.data(), end, number);
+    if (parsed.ec != std::errc{} || parsed.ptr != end) {
+      return std::nullopt;
+    }
+    if (option == "--max-dropout-ms" && !policy.max_dropout_ms) {
+      policy.max_dropout_ms = number;
+    } else if (option == "--min-samples" && !policy.min_samples) {
+      policy.min_samples = number;
+    } else if (option == "--instance" && !policy.instance &&
+               number <= std::numeric_limits<uint8_t>::max()) {
+      policy.instance = static_cast<int>(number);
+    } else {
+      return std::nullopt;
+    }
+  }
+  if ((!policy.max_dropout_ms && !policy.min_samples) || (policy.instance && !policy.min_samples)) {
+    return std::nullopt;
+  }
+  return policy;
+}
 
 void printDropouts(uint64_t count, uint64_t duration_ms)
 {
@@ -247,6 +297,45 @@ std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConf
                                                   bool json = false)
 {
   return readLog(path, std::make_shared<flight_log::DataContainer>(storage), json);
+}
+
+int checkQuality(const char* path, const QualityPolicy& policy)
+{
+  const auto summary = std::make_shared<SummaryData>();
+  if (!readLog(path, summary, false)) {
+    return 1;
+  }
+  if (!summary->parsingErrors().empty()) {
+    std::fprintf(stderr, "%s: Cannot check recording quality after a parsing warning\n", path);
+    return 1;
+  }
+
+  bool passed = true;
+  if (policy.max_dropout_ms) {
+    const auto observed = summary->maxDropoutMs();
+    const bool within_limit = observed <= *policy.max_dropout_ms;
+    printf("%s maximum dropout %" PRIu64 " ms (limit %" PRIu64 " ms)\n",
+           within_limit ? "PASS" : "FAIL", observed, *policy.max_dropout_ms);
+    passed = within_limit;
+  }
+  if (policy.min_samples) {
+    const int instance = policy.instance.value_or(0);
+    const auto& subscriptions = summary->subscriptionsByNameAndMultiId();
+    const auto topic = subscriptions.find({policy.topic, instance});
+    if (topic == subscriptions.end()) {
+      printf("FAIL topic %s (%d) missing (0 samples, minimum %" PRIu64 ")\n",
+             policy.topic.c_str(), instance, *policy.min_samples);
+      passed = false;
+    } else {
+      const auto observed = summary->sampleCount(topic->second->getAddLoggedMessage().msgId());
+      const bool meets_minimum = observed >= *policy.min_samples;
+      printf("%s topic %s (%d) samples %" PRIu64 " (minimum %" PRIu64 ")\n",
+             meets_minimum ? "PASS" : "FAIL", policy.topic.c_str(), instance, observed,
+             *policy.min_samples);
+      passed = passed && meets_minimum;
+    }
+  }
+  return passed ? 0 : 3;
 }
 
 template <typename T>
@@ -614,10 +703,25 @@ int main(int argc, char** argv)
                          "       flight-log-inspector --parameter-changes <file.ulg>\n"
                          "       flight-log-inspector export-topic <file.ulg> <topic>\n"
                          "         [--instance N] [--start-us N] [--end-us N]\n"
-                         "       flight-log-inspector diff-params <before.ulg> <after.ulg>\n";
+                         "       flight-log-inspector diff-params <before.ulg> <after.ulg>\n"
+                         "       flight-log-inspector check <file.ulg> [--max-dropout-ms N]\n"
+                         "         [--min-samples TOPIC N [--instance N]]\n";
   if (argc == 2 && std::string_view(argv[1]) == "--help") {
     std::fputs(usage, stdout);
     return 0;
+  }
+  if (argc > 2 && std::string_view(argv[1]) == "check") {
+    try {
+      const auto policy = parseQualityPolicy(argc, argv);
+      if (!policy) {
+        std::fputs(usage, stderr);
+        return 2;
+      }
+      return checkQuality(argv[2], *policy);
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "%s: %s\n", argv[2], error.what());
+      return 1;
+    }
   }
   if (argc > 2 && std::string_view(argv[1]) == "diff-params") {
     if (argc != 4) {
