@@ -18,6 +18,12 @@ add_test(NAME cli-summary COMMAND ${CMAKE_COMMAND}
   -DEXPECTED_STATUS=0 "-DEXPECTED_OUTPUT=sensor_combined (0)   -  1298"
   -P ${cli_tests}
 )
+add_test(NAME cli-float-precision COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DARGUMENT=${CMAKE_CURRENT_SOURCE_DIR}/log_files/sample_log_small.ulg
+  -DEXPECTED_STATUS=0 "-DEXPECTED_OUTPUT=ASPD_SC_P_NOISE: 9.99999975e-05"
+  -P ${cli_tests}
+)
 add_test(NAME cli-empty-input COMMAND ${CMAKE_COMMAND}
   -DCLI=$<TARGET_FILE:flight-log-inspector> -DARGUMENT=${empty_log}
   -DEXPECTED_STATUS=1 "-DEXPECTED_ERROR=Not enough data to read file magic"
