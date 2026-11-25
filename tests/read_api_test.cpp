@@ -267,6 +267,37 @@ TEST_CASE("Write complicated, nested data format, then read it")
                   flight_log::AccessException);
 }
 
+TEST_CASE("Parameter defaults retain system and current setup values independently")
+{
+  using Type = flight_log::ulog_parameter_default_type_t;
+  flight_log::DataContainer log(flight_log::DataContainer::StorageConfig::FullLog);
+  const flight_log::Parameter system("SAMPLE_RATE", int32_t{50});
+  const flight_log::Parameter setup("SAMPLE_RATE", int32_t{100});
+  const flight_log::Parameter shared("SAMPLE_WINDOW", int32_t{20});
+
+  log.fileHeader(flight_log::FileHeader(0, true));
+  log.parameterDefault({system.field(), system.valueRaw(), Type::system});
+  log.parameterDefault({shared.field(), shared.valueRaw(), Type::system | Type::current_setup});
+  log.headerComplete();
+  log.parameterDefault({setup.field(), setup.valueRaw(), Type::current_setup});
+
+  const auto& system_defaults = log.defaultParametersByType().at(Type::system);
+  const auto& setup_defaults = log.defaultParametersByType().at(Type::current_setup);
+  const auto system_rate = system_defaults.at("SAMPLE_RATE").value().as<int32_t>();
+  const auto setup_rate = setup_defaults.at("SAMPLE_RATE").value().as<int32_t>();
+  MESSAGE("logged SAMPLE_RATE defaults: system=", system_rate, " current setup=", setup_rate);
+  CHECK_EQ(system_rate, 50);
+  CHECK_EQ(setup_rate, 100);
+  CHECK_EQ(system_defaults.at("SAMPLE_WINDOW").value().as<int32_t>(), 20);
+  CHECK_EQ(setup_defaults.at("SAMPLE_WINDOW").value().as<int32_t>(), 20);
+
+  const flight_log::Parameter updated_setup("SAMPLE_RATE", int32_t{125});
+  log.parameterDefault({updated_setup.field(), updated_setup.valueRaw(), Type::current_setup});
+  CHECK_EQ(setup_defaults.at("SAMPLE_RATE").value().as<int32_t>(), 125);
+  CHECK_EQ(system_defaults.at("SAMPLE_RATE").value().as<int32_t>(), 50);
+  CHECK_EQ(log.defaultParameters().at("SAMPLE_RATE").value().as<int32_t>(), 50);
+}
+
 TEST_CASE("Read string values that fill the whole field or are empty")
 {
   std::vector<uint8_t> written_data;

@@ -30,12 +30,15 @@ class SimpleWriter {
  public:
   /**
    * Constructor with a callback for writing data.
-   * @param data_write_cb callback for serialized ULog data
+   * @param data_write_cb callback for serialized ULog chunks. A record may use multiple calls.
+   * If the callback throws after writing any bytes of a record, restore the output to the
+   * previous record boundary before retrying.
    * @param timestamp_us start timestamp [us]
    */
   explicit SimpleWriter(DataWriteCB data_write_cb, uint64_t timestamp_us);
   /**
    * Constructor to write to a file.
+   * Throws ParsingException if the file cannot be opened or written.
    * @param filename ULog file to write to (will be overwritten if it exists)
    * @param timestamp_us  start timestamp [us]
    */
@@ -133,7 +136,8 @@ class SimpleWriter {
   }
 
   /**
-   * Flush the buffer and call fsync() on the file (only if the file-based constructor is used).
+   * Flush and synchronize a file-based writer, throwing ParsingException on error.
+   * Call before destruction to check for buffered output errors. Does nothing for a callback.
    */
   void fsync();
 
@@ -152,8 +156,9 @@ class SimpleWriter {
 
   void writeDataImpl(uint16_t id, const uint8_t* data, unsigned length);
 
+  std::string _filename;
+  std::unique_ptr<std::FILE, decltype(&std::fclose)> _file{nullptr, &std::fclose};
   std::unique_ptr<Writer> _writer;
-  std::FILE* _file{nullptr};
 
   bool _header_complete{false};
   std::unordered_map<std::string, Format> _formats;
