@@ -36,6 +36,7 @@ class SimpleWriter {
   explicit SimpleWriter(DataWriteCB data_write_cb, uint64_t timestamp_us);
   /**
    * Constructor to write to a file.
+   * Throws ParsingException if the file cannot be opened or written.
    * @param filename ULog file to write to (will be overwritten if it exists)
    * @param timestamp_us  start timestamp [us]
    */
@@ -133,7 +134,8 @@ class SimpleWriter {
   }
 
   /**
-   * Flush the buffer and call fsync() on the file (only if the file-based constructor is used).
+   * Flush and synchronize a file-based writer, throwing ParsingException on error.
+   * Call before destruction to check for buffered output errors. Does nothing for a callback.
    */
   void fsync();
 
@@ -152,8 +154,9 @@ class SimpleWriter {
 
   void writeDataImpl(uint16_t id, const uint8_t* data, unsigned length);
 
+  std::string _filename;
+  std::unique_ptr<std::FILE, decltype(&std::fclose)> _file{nullptr, &std::fclose};
   std::unique_ptr<Writer> _writer;
-  std::FILE* _file{nullptr};
 
   bool _header_complete{false};
   std::unordered_map<std::string, Format> _formats;
