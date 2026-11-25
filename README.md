@@ -33,8 +33,17 @@ The CLI, library, and default CLI tests build without external dependencies. Set
 In the topic listing, `sensor_combined (0)   -  1298` means instance 0 has 1,298 samples.
 Parsing warnings go to standard error. A fatal parse error or an unreadable file produces a
 nonzero exit status. The CLI keeps samples in memory while it builds the report. The C++
-reader can process chunks incrementally for large logs. Logs with appended data segments
+reader can process chunks incrementally for large logs. Call `Reader::finish()` after the last
+chunk to report incomplete input. Logs with appended data segments
 may yield partial results.
+
+Add `--json` before the path to produce one machine-readable diagnostics report.
+Schema version 1 reports `status`, parsing `diagnostics`, `dropouts` with a
+count and total duration in milliseconds, and `topics` with each name, instance
+and sample count. Status is `ok` for a log accepted without diagnostics,
+`warning` for recoverable parsing problems, and `error` for an unreadable log
+or fatal parsing failure. Both successful statuses exit with code 0. Errors
+still produce a JSON report and exit with code 1.
 
 ## C++ library
 

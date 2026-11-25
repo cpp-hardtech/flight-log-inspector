@@ -79,9 +79,18 @@ class DataContainer : public DataHandlerInterface {
     return _message_formats;
   }
   const std::map<std::string, Parameter>& initialParameters() const { return _initial_parameters; }
+  // The first logged default for each name, regardless of category.
   const std::map<std::string, ParameterDefault>& defaultParameters() const
   {
     return _default_parameters;
+  }
+  using DefaultParametersByType =
+      std::map<ulog_parameter_default_type_t, std::map<std::string, ParameterDefault>>;
+  // The latest logged default for each name in each category. A record with
+  // multiple category bits contributes to each corresponding category.
+  const DefaultParametersByType& defaultParametersByType() const
+  {
+    return _default_parameters_by_type;
   }
   const std::vector<Parameter>& changedParameters() const { return _changed_parameters; }
   const std::vector<Logging>& logging() const { return _logging; }
@@ -140,6 +149,7 @@ class DataContainer : public DataHandlerInterface {
   std::map<std::string, std::shared_ptr<MessageFormat>> _message_formats;
   std::map<std::string, Parameter> _initial_parameters;
   std::map<std::string, ParameterDefault> _default_parameters;
+  DefaultParametersByType _default_parameters_by_type;
   std::vector<Parameter> _changed_parameters;
   std::map<uint16_t, std::shared_ptr<Subscription>> _subscriptions_by_message_id;
   std::map<NameAndMultiIdKey, std::shared_ptr<Subscription>> _subscriptions_by_name_and_multi_id;

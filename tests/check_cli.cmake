@@ -1,6 +1,14 @@
-execute_process(COMMAND "${CLI}" "${ARGUMENT}"
-  RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error
-)
+set(options)
+if(DEFINED CLI_OPTION)
+  list(APPEND options "${CLI_OPTION}")
+endif()
+if(DEFINED OUTPUT_PATH)
+  set(destination OUTPUT_FILE "${OUTPUT_PATH}")
+else()
+  set(destination OUTPUT_VARIABLE output)
+endif()
+execute_process(COMMAND "${CLI}" ${options} "${ARGUMENT}"
+  RESULT_VARIABLE status ${destination} ERROR_VARIABLE error)
 
 if(NOT status STREQUAL EXPECTED_STATUS)
   message(FATAL_ERROR "Expected exit ${EXPECTED_STATUS}, got ${status}\n${error}")
@@ -11,6 +19,10 @@ if(DEFINED EXPECTED_OUTPUT)
   if(output_index EQUAL -1)
     message(FATAL_ERROR "Output did not contain '${EXPECTED_OUTPUT}'")
   endif()
+endif()
+
+if(EXPECT_QUIET_STDERR AND NOT error STREQUAL "")
+  message(FATAL_ERROR "Unexpected error output\n${error}")
 endif()
 
 if(DEFINED EXPECTED_ERROR)
