@@ -24,6 +24,11 @@ add_test(NAME cli-float-precision COMMAND ${CMAKE_COMMAND}
   -DEXPECTED_STATUS=0 "-DEXPECTED_OUTPUT=ASPD_SC_P_NOISE: 9.99999975e-05"
   -P ${cli_tests}
 )
+add_test(NAME cli-parameter-changes COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DLOG_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/log_files
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_parameter_changes.cmake
+)
 add_test(NAME cli-empty-input COMMAND ${CMAKE_COMMAND}
   -DCLI=$<TARGET_FILE:flight-log-inspector> -DARGUMENT=${empty_log}
   -DEXPECTED_STATUS=1 "-DEXPECTED_ERROR=Not enough data to read file magic"

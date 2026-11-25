@@ -45,6 +45,15 @@ and sample count. Status is `ok` for a log accepted without diagnostics,
 or fatal parsing failure. Both successful statuses exit with code 0. Errors
 still produce a JSON report and exit with code 1.
 
+Use `--parameter-changes` to inspect parameter updates recorded during the flight:
+
+```sh
+./install/bin/flight-log-inspector --parameter-changes tests/log_files/sample.ulg
+```
+
+The report lists updates in recording order, including repeated values. The command keeps
+parameter updates and header information in memory while skipping storage of topic samples.
+
 ## C++ library
 
 Point `CMAKE_PREFIX_PATH` to the installation directory, then link the library in your project.
