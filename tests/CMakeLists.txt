@@ -7,6 +7,11 @@ add_test(NAME cli-help COMMAND ${CMAKE_COMMAND}
   -DEXPECTED_STATUS=0 "-DEXPECTED_OUTPUT=Usage: flight-log-inspector"
   -P ${cli_tests}
 )
+add_test(NAME cli-export-topic COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DLOG=${CMAKE_CURRENT_SOURCE_DIR}/log_files/sample_log_small.ulg
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_export_topic.cmake
+)
 add_test(NAME cli-summary COMMAND ${CMAKE_COMMAND}
   -DCLI=$<TARGET_FILE:flight-log-inspector>
   -DARGUMENT=${CMAKE_CURRENT_SOURCE_DIR}/log_files/sample_log_small.ulg

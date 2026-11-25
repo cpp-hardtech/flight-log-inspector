@@ -57,6 +57,20 @@ target_link_libraries(my_tool PRIVATE flight_log::flight_log)
 Public headers are under `flight_log/`. The [examples](examples/) show typed sample access,
 streaming reads, and file writing.
 
+## Export topic samples
+
+```sh
+./install/bin/flight-log-inspector export-topic tests/log_files/sample_log_small.ulg sensor_combined \
+  --start-us 20488019 --end-us 20492907 > sensor_combined.csv
+```
+
+The command writes CSV to standard output in recorded sample order. The bounds are inclusive
+and use raw log timestamps in microseconds. Omit either bound to leave that end open. Use
+`--instance N` to select a topic instance. Instance 0 is the default. The CSV header lists
+fields in schema order, with indexed columns for arrays, dotted names for nested fields, and
+one text column for each character array. Padding fields are omitted. A window without samples
+still writes the header.
+
 ## Contributing and license
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The project is distributed under the BSD 3-Clause
