@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -143,8 +144,24 @@ int reportInputError(const char* description, const char* path, bool json)
 
 using StorageConfig = flight_log::DataContainer::StorageConfig;
 
+class ParameterUpdateContainer final : public flight_log::DataContainer {
+ public:
+  ParameterUpdateContainer() : DataContainer(StorageConfig::Header) {}
+
+  void parameter(const flight_log::Parameter& parameter) override
+  {
+    if (!isHeaderComplete()) {
+      DataContainer::parameter(parameter);
+      return;
+    }
+    auto update = parameter;
+    update.field().resolveDefinition(messageFormats(), 0);
+    changedParametersRef().push_back(std::move(update));
+  }
+};
+
 std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConfig storage,
-                                                  bool json = false)
+                                                  bool json = false, bool parameter_changes = false)
 {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -152,7 +169,9 @@ std::shared_ptr<flight_log::DataContainer> readLog(const char* path, StorageConf
     return nullptr;
   }
   std::array<uint8_t, 4096> buffer{};
-  const auto data_container = std::make_shared<flight_log::DataContainer>(storage);
+  const std::shared_ptr<flight_log::DataContainer> data_container =
+      parameter_changes ? std::make_shared<ParameterUpdateContainer>()
+                        : std::make_shared<flight_log::DataContainer>(storage);
   flight_log::Reader reader{data_container};
   do {
     file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
@@ -268,9 +287,9 @@ int compareParameters(const char* before_path, const char* after_path)
   return 0;
 }
 
-int inspectLog(const char* path, bool json)
+int inspectLog(const char* path, bool json, bool parameter_changes)
 {
-  const auto data_container = readLog(path, StorageConfig::FullLog, json);
+  const auto data_container = readLog(path, StorageConfig::FullLog, json, parameter_changes);
   if (!data_container) {
     return 1;
   }
@@ -279,28 +298,45 @@ int inspectLog(const char* path, bool json)
     return data_container->hadFatalError() ? 1 : 0;
   }
 
-  // Dropouts
-  printf("Dropouts: %zu, total duration: %" PRIu64 " ms\n", data_container->dropouts().size(),
-         totalDropoutDuration(*data_container));
-
   auto print_value = [](const std::string& name, const flight_log::Value& value) {
     std::visit(
         [&name](auto&& arg) {
           using T = std::decay_t<decltype(arg)>;
           if constexpr (std::is_same_v<T, std::string>) {
             printf(" %s: %s\n", name.c_str(), arg.c_str());
-          } else if constexpr (std::is_same_v<T, int32_t>) {
-            printf(" %s: %i\n", name.c_str(), arg);
-          } else if constexpr (std::is_same_v<T, uint32_t>) {
-            printf(" %s: %u\n", name.c_str(), arg);
+          } else if constexpr (std::is_same_v<T, bool>) {
+            printf(" %s: %s\n", name.c_str(), arg ? "true" : "false");
+          } else if constexpr (std::is_same_v<T, char>) {
+            printf(" %s: %u\n", name.c_str(),
+                   static_cast<unsigned int>(static_cast<unsigned char>(arg)));
+          } else if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+            printf(" %s: %" PRId64 "\n", name.c_str(), static_cast<int64_t>(arg));
+          } else if constexpr (std::is_integral_v<T>) {
+            printf(" %s: %" PRIu64 "\n", name.c_str(), static_cast<uint64_t>(arg));
+          } else if constexpr (std::is_same_v<T, double>) {
+            printf(" %s: %.*g\n", name.c_str(), std::numeric_limits<double>::max_digits10, arg);
           } else if constexpr (std::is_same_v<T, float>) {
-            printf(" %s: %.3f\n", name.c_str(), static_cast<double>(arg));
+            printf(" %s: %.*g\n", name.c_str(), std::numeric_limits<float>::max_digits10,
+                   static_cast<double>(arg));
           } else {
             printf(" %s: <data>\n", name.c_str());
           }
         },
         value.asNativeTypeVariant());
   };
+
+  if (parameter_changes) {
+    const auto& updates = data_container->changedParameters();
+    printf("Parameter updates: %zu\n", updates.size());
+    for (const auto& update : updates) {
+      print_value(update.field().name(), update.value());
+    }
+    return 0;
+  }
+
+  // Dropouts
+  printf("Dropouts: %zu, total duration: %" PRIu64 " ms\n", data_container->dropouts().size(),
+         totalDropoutDuration(*data_container));
 
   // Info messages
   printf("Info Messages:\n");
@@ -516,6 +552,7 @@ int exportTopic(const char* path, const char* topic, const ExportOptions& option
 int main(int argc, char** argv)
 {
   constexpr auto usage = "Usage: flight-log-inspector [--json] <file.ulg>\n"
+                         "       flight-log-inspector --parameter-changes <file.ulg>\n"
                          "       flight-log-inspector export-topic <file.ulg> <topic>\n"
                          "         [--instance N] [--start-us N] [--end-us N]\n"
                          "       flight-log-inspector diff-params <before.ulg> <after.ulg>\n";
@@ -552,15 +589,18 @@ int main(int argc, char** argv)
     }
   }
   const bool json = argc > 1 && std::string_view(argv[1]) == "--json";
-  if (argc != (json ? 3 : 2)) {
+  const bool parameter_changes = argc > 1 && std::string_view(argv[1]) == "--parameter-changes";
+  const bool has_mode = json || parameter_changes;
+  if (argc != (has_mode ? 3 : 2)) {
     std::fputs(usage, stderr);
     return 2;
   }
-  const char* path = argv[json ? 2 : 1];
+  const char* path = argv[has_mode ? 2 : 1];
   try {
-    const int status = inspectLog(path, json);
+    const int status = inspectLog(path, json, parameter_changes);
     if (std::fflush(stdout) != 0 || std::ferror(stdout)) {
-      std::fprintf(stderr, "%s: Cannot write log report\n", path);
+      std::fprintf(stderr, "%s: Cannot write %s\n", path,
+                   parameter_changes ? "parameter updates" : "log report");
       return 1;
     }
     return status;
