@@ -17,6 +17,10 @@
 
 namespace flight_log {
 
+namespace {
+constexpr int kULogHeaderLength = sizeof(ulog_message_header_s);
+}  // namespace
+
 const std::set<ULogMessageType> Reader::kKnownMessageTypes{{
     ULogMessageType::FORMAT,
     ULogMessageType::DATA,
@@ -58,69 +62,87 @@ Reader::~Reader()
 
 void Reader::readChunk(const uint8_t* data, int length)
 {
-  if (_state == State::InvalidData) {
+  if (_state == State::InvalidData || _state == State::Finished || length <= 0) {
     return;
   }
 
+  auto ensure_enough_data_in_partial_buffer = [&](int required_data) {
+    if (_partial_message_buffer_length < required_data && length > 0) {
+      const int num_append = std::min(required_data - _partial_message_buffer_length, length);
+      const int required_capacity = _partial_message_buffer_length + num_append;
+      if (required_capacity > _partial_message_buffer_length_capacity) {
+        _partial_message_buffer_length_capacity = required_capacity;
+        _partial_message_buffer =
+            static_cast<uint8_t*>(realloc(_partial_message_buffer, required_capacity));
+        DBG_PRINTF("%i: resized partial buffer to %i\n", _total_num_read, required_capacity);
+      }
+      appendToPartialBuffer(data, num_append);
+      data += num_append;
+      length -= num_append;
+      _total_num_read += num_append;
+    }
+    return _partial_message_buffer_length >= required_data;
+  };
+
   if (_state == State::ReadMagic) {
-    const int num_read = readMagic(data, length);
-    data += num_read;
-    length -= num_read;
-    _total_num_read += num_read;
+    if (!ensure_enough_data_in_partial_buffer(sizeof(ulog_file_header_s))) {
+      return;
+    }
+    readMagic(*reinterpret_cast<const ulog_file_header_s*>(_partial_message_buffer));
+    _partial_message_buffer_length = 0;
   }
 
-  if (_state == State::ReadFlagBits && length > 0) {
-    const int num_read = readFlagBits(data, length);
-    data += num_read;
-    length -= num_read;
-    _total_num_read += num_read;
+  if (_state == State::ReadFlagBits) {
+    if (!ensure_enough_data_in_partial_buffer(kULogHeaderLength)) {
+      return;
+    }
+    const auto* header = reinterpret_cast<const ulog_message_header_s*>(_partial_message_buffer);
+    if (static_cast<ULogMessageType>(header->msg_type) == ULogMessageType::FLAG_BITS) {
+      const int flag_length = header->msg_size + kULogHeaderLength;
+      if (flag_length < static_cast<int>(sizeof(ulog_message_flag_bits_s))) {
+        _data_handler_interface->error("Not enough data to read file flags", false);
+        _state = State::InvalidData;
+        return;
+      }
+      if (!ensure_enough_data_in_partial_buffer(flag_length)) {
+        return;
+      }
+      readFlagBits(*reinterpret_cast<const ulog_message_flag_bits_s*>(_partial_message_buffer));
+      _partial_message_buffer_length = 0;
+    } else {
+      _data_handler_interface->fileHeader(FileHeader{_file_header});
+      _state = State::ReadHeader;
+    }
   }
 
-  static constexpr int kULogHeaderLength = static_cast<int>(sizeof(ulog_message_header_s));
-
-  while (length > 0 && !_need_recovery) {
+  if (_state == State::InvalidData) {
+    return;
+  }
+  while (length > 0 || _partial_message_buffer_length >= kULogHeaderLength) {
+    if (_need_recovery) {
+      tryToRecover(data, length);
+      if (_need_recovery) {
+        return;
+      }
+    }
     // Try to get a full ulog message. There's 2 options:
     // - we have some partial data in the buffer. We need to append and use that buffer
     // - no partial data left. Use 'data' if it contains a full message
     const uint8_t* ulog_message = nullptr;
     bool clear_from_partial_message_buffer = false;
     if (_partial_message_buffer_length > 0) {
-      auto ensure_enough_data_in_partial_buffer = [&](int required_data) -> bool {
-        if (_partial_message_buffer_length < required_data) {
-          // Try to append
-          const int num_append = std::min(required_data - _partial_message_buffer_length, length);
-          if (_partial_message_buffer_length + num_append >
-              _partial_message_buffer_length_capacity) {
-            // Overflow, resize buffer
-            _partial_message_buffer_length_capacity = _partial_message_buffer_length + num_append;
-            _partial_message_buffer = static_cast<uint8_t*>(
-                realloc(_partial_message_buffer, _partial_message_buffer_length_capacity));
-            DBG_PRINTF("%i: resized partial buffer to %i\n", _total_num_read,
-                       _partial_message_buffer_length_capacity);
-          }
-          memcpy(_partial_message_buffer + _partial_message_buffer_length, data, num_append);
-          _partial_message_buffer_length += num_append;
-          data += num_append;
-          length -= num_append;
-          _total_num_read += num_append;
-        }
-        return _partial_message_buffer_length >= required_data;
-      };
-      if (ensure_enough_data_in_partial_buffer(kULogHeaderLength)) {
-        const ulog_message_header_s* header =
-            reinterpret_cast<const ulog_message_header_s*>(_partial_message_buffer);
-        if (ensure_enough_data_in_partial_buffer(header->msg_size + kULogHeaderLength)) {
-          ulog_message = reinterpret_cast<const uint8_t*>(_partial_message_buffer);
-          clear_from_partial_message_buffer = true;
-        } else {
-          // Not enough data yet (length == 0) or overflow
-          DBG_PRINTF("%i: not enough data (length=%i)\n", _total_num_read, length);
-        }
+      if (!ensure_enough_data_in_partial_buffer(kULogHeaderLength)) {
+        return;
       }
-
+      const auto* header = reinterpret_cast<const ulog_message_header_s*>(_partial_message_buffer);
+      if (!ensure_enough_data_in_partial_buffer(header->msg_size + kULogHeaderLength)) {
+        return;
+      }
+      ulog_message = _partial_message_buffer;
+      clear_from_partial_message_buffer = true;
     } else {
       int full_message_length = 0;
-      if (length > kULogHeaderLength) {
+      if (length >= kULogHeaderLength) {
         const ulog_message_header_s* header = reinterpret_cast<const ulog_message_header_s*>(data);
         if (length >= header->msg_size + kULogHeaderLength) {
           full_message_length = header->msg_size + kULogHeaderLength;
@@ -148,7 +170,6 @@ void Reader::readChunk(const uint8_t* data, int length)
       if (header->msg_size == 0 || header->msg_type == 0) {
         DBG_PRINTF("%i: Invalid msg detected\n", _total_num_read);
         corruptionDetected();
-        // We'll exit the loop afterwards
       } else {
         // Parse the message
         try {
@@ -174,33 +195,48 @@ void Reader::readChunk(const uint8_t* data, int length)
       }
     }
   }
-
-  if (_need_recovery) {
-    tryToRecover(data, length);
-  }
 }
 
-void Reader::tryToRecover(const uint8_t* data, int length)
+void Reader::finish()
+{
+  const auto previous_state = _state;
+  if (previous_state == State::InvalidData || previous_state == State::Finished) {
+    return;
+  }
+  _state = State::Finished;
+
+  if (previous_state == State::ReadMagic) {
+    _data_handler_interface->error("Not enough data to read file magic", false);
+  } else if (previous_state == State::ReadFlagBits &&
+             _partial_message_buffer_length >= kULogHeaderLength) {
+    _data_handler_interface->error("Not enough data to read file flags", false);
+  } else {
+    if (previous_state == State::ReadFlagBits) {
+      _data_handler_interface->fileHeader(FileHeader{_file_header});
+    }
+    if (_partial_message_buffer_length > 0 && !_need_recovery) {
+      _data_handler_interface->error("Truncated message at end of log", true);
+    }
+  }
+  _partial_message_buffer_length = 0;
+}
+
+void Reader::tryToRecover(const uint8_t*& data, int& length)
 {
   // Try to find a valid message in 'data' by moving data into the partial buffer and search for a
   // message
-  while (length > 0) {
-    const int num_append = appendToPartialBuffer(data, length);
-    data += num_append;
-    length -= num_append;
-    _total_num_read += num_append;
+  while (length > 0 || _partial_message_buffer_length >= kULogHeaderLength) {
+    if (length > 0) {
+      const int num_append = appendToPartialBuffer(data, length);
+      data += num_append;
+      length -= num_append;
+      _total_num_read += num_append;
+    }
 
-    if (_partial_message_buffer_length >= static_cast<int>(sizeof(ulog_message_header_s))) {
+    if (_partial_message_buffer_length >= kULogHeaderLength) {
       bool found = false;
       int index = 0;
-      // If the partial buffer was already full, skip the first index, otherwise we risk infinite
-      // recursion
-      if (num_append == 0) {
-        index = 1;
-      }
-      for (;
-           index < _partial_message_buffer_length - static_cast<int>(sizeof(ulog_message_header_s));
-           ++index) {
+      for (; index <= _partial_message_buffer_length - kULogHeaderLength; ++index) {
         const ulog_message_header_s* header =
             reinterpret_cast<const ulog_message_header_s*>(_partial_message_buffer + index);
         // Try to use it if it looks sane (we could also check for a SYNC message)
@@ -216,12 +252,11 @@ void Reader::tryToRecover(const uint8_t* data, int length)
           // DataHandlerInterface::isValidDataMessage().
           bool candidate_valid = true;
           if (static_cast<ULogMessageType>(header->msg_type) == ULogMessageType::DATA) {
-            if (header->msg_size < 2 || _partial_message_buffer_length - index <
-                                            static_cast<int>(sizeof(ulog_message_header_s)) + 2) {
-              // Too small to even hold the 2-byte msg_id, or not enough buffered data
-              // yet to see it - can't validate this candidate, so don't accept it
-              // (more data may still arrive for a later pass).
+            if (header->msg_size < 2) {
               candidate_valid = false;
+            } else if (_partial_message_buffer_length - index < kULogHeaderLength + 2) {
+              // Keep the candidate until the rest of its message ID arrives.
+              break;
             } else {
               uint16_t candidate_msg_id = 0;
               memcpy(&candidate_msg_id,
@@ -248,15 +283,16 @@ void Reader::tryToRecover(const uint8_t* data, int length)
 
       if (found) {
         DBG_PRINTF(
-            "%i: recovered, recursive call (index = %i, length = %i, partial buf len = %i)\n",
+            "%i: recovered (index = %i, length = %i, partial buf len = %i)\n",
             _total_num_read, index, length, _partial_message_buffer_length);
         _need_recovery = false;
-        readChunk(data, length);
-
         return;
       }
       DBG_PRINTF("%i: no valid msg found (length = %i, partial buf len = %i)\n", _total_num_read,
                  length, _partial_message_buffer_length);
+    }
+    if (length == 0) {
+      return;
     }
   }
 }
@@ -279,75 +315,40 @@ int Reader::appendToPartialBuffer(const uint8_t* data, int length)
   return num_append;
 }
 
-int Reader::readMagic(const uint8_t* data, int length)
+void Reader::readMagic(const ulog_file_header_s& header)
 {
-  // Assume we read the whole magic in one piece. If needed, we could handle reading it in multiple
-  // bits. Note that this could also happen for truncated files.
-  if (length < static_cast<int>(sizeof(ulog_file_header_s))) {
-    _data_handler_interface->error("Not enough data to read file magic", false);
-    _state = State::InvalidData;
-    return 0;
-  }
-
-  const ulog_file_header_s* header = reinterpret_cast<const ulog_file_header_s*>(data);
-
   // Check magic bytes
-  if (memcmp(header->magic, ulog_file_magic_bytes, sizeof(ulog_file_magic_bytes)) != 0) {
+  if (memcmp(header.magic, ulog_file_magic_bytes, sizeof(ulog_file_magic_bytes)) != 0) {
     _data_handler_interface->error("Invalid file format (incorrect header bytes)", false);
     _state = State::InvalidData;
-    return 0;
+    return;
   }
 
   _state = State::ReadFlagBits;
-  _file_header = *header;
-
-  return sizeof(ulog_file_header_s);
+  _file_header = header;
 }
 
-int Reader::readFlagBits(const uint8_t* data, int length)
+void Reader::readFlagBits(const ulog_message_flag_bits_s& flag_bits)
 {
-  // Assume we read the whole flags in one piece (for simplicity of the parser)
-  int ret = 0;
-  if (length < static_cast<int>(sizeof(ulog_message_flag_bits_s))) {
-    _data_handler_interface->error("Not enough data to read file flags", false);
-    _state = State::InvalidData;
-    return 0;
+  if (flag_bits.appended_offsets[0] != 0) {
+    // TODO: handle appended data
+    _data_handler_interface->error("File contains appended offsets - this is not supported", true);
   }
-  // This message is optional and follows directly the file magic
-  const ulog_message_flag_bits_s* flag_bits =
-      reinterpret_cast<const ulog_message_flag_bits_s*>(data);
-  if (static_cast<ULogMessageType>(flag_bits->msg_type) == ULogMessageType::FLAG_BITS) {
-    // This is expected to be the first message after the file magic
-    if (flag_bits->appended_offsets[0] != 0) {
-      // TODO: handle appended data
-      _data_handler_interface->error("File contains appended offsets - this is not supported",
-                                     true);
-    }
-    // Check incompat flags
-    bool has_incompat_flags = false;
-    if (flag_bits->incompat_flags[0] & ~(ULOG_INCOMPAT_FLAG0_DATA_APPENDED_MASK)) {
+  // Check incompat flags
+  bool has_incompat_flags = flag_bits.incompat_flags[0] & ~ULOG_INCOMPAT_FLAG0_DATA_APPENDED_MASK;
+  for (unsigned i = 1;
+       i < sizeof(flag_bits.incompat_flags) / sizeof(flag_bits.incompat_flags[0]); ++i) {
+    if (flag_bits.incompat_flags[i]) {
       has_incompat_flags = true;
     }
-    for (unsigned i = 1;
-         i < sizeof(flag_bits->incompat_flags) / sizeof(flag_bits->incompat_flags[0]); ++i) {
-      if (flag_bits->incompat_flags[i]) {
-        has_incompat_flags = true;
-      }
-    }
-    if (has_incompat_flags) {
-      _data_handler_interface->error("Unknown incompatible flag set: cannot parse the log", false);
-      _state = State::InvalidData;
-    } else {
-      _data_handler_interface->fileHeader({_file_header, *flag_bits});
-      ret = flag_bits->msg_size + ULOG_MSG_HEADER_LEN;
-      _state = State::ReadHeader;
-    }
+  }
+  if (has_incompat_flags) {
+    _data_handler_interface->error("Unknown incompatible flag set: cannot parse the log", false);
+    _state = State::InvalidData;
   } else {
-    // Create header w/o flag bits
-    _data_handler_interface->fileHeader(FileHeader{_file_header});
+    _data_handler_interface->fileHeader({_file_header, flag_bits});
     _state = State::ReadHeader;
   }
-  return ret;
 }
 
 void Reader::readHeaderMessage(const uint8_t* message)
@@ -372,6 +373,7 @@ void Reader::readHeaderMessage(const uint8_t* message)
     case ULogMessageType::ADD_LOGGED_MSG:
     case ULogMessageType::LOGGING:
     case ULogMessageType::LOGGING_TAGGED:
+    case ULogMessageType::DROPOUT:
       DBG_PRINTF("%i: Header completed\n", _total_num_read);
       _state = State::ReadData;
       _data_handler_interface->headerComplete();

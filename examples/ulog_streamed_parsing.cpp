@@ -27,9 +27,13 @@ class VehicleStatus : public TopicSubscription {
   {
     _timestamp_field = subscription->field("timestamp");
     _nav_state_field = subscription->field("nav_state");
-    // Optional field (e.g. when a message changes)
-    if (subscription->fieldMap().find("armed_state") != subscription->fieldMap().end()) {
-      _armed_state_field = subscription->field("armed_state");
+    const auto& fields = subscription->fieldMap();
+    auto arming_state = fields.find("arming_state");
+    if (arming_state == fields.end()) {
+      arming_state = fields.find("armed_state");
+    }
+    if (arming_state != fields.end()) {
+      _armed_state_field = arming_state->second;
     }
   }
 
@@ -39,7 +43,7 @@ class VehicleStatus : public TopicSubscription {
     const auto nav_state = data[*_nav_state_field].as<std::uint32_t>();
     uint8_t armed_state = 0;
     if (_armed_state_field) {
-      armed_state = data[*_nav_state_field].as<std::uint8_t>();
+      armed_state = data[*_armed_state_field].as<std::uint8_t>();
     }
     printf("vehicle_status: t: %" PRId64 ": nav_state: %" PRIu32 ", armed_state: %" PRId8 "\n",
            timestamp, nav_state, armed_state);

@@ -75,8 +75,10 @@ int main(int argc, char** argv)
 
       std::this_thread::sleep_for(10ms);
     }
+    writer.fsync();
   } catch (const flight_log::ExceptionBase& e) {
-    printf("ULog exception: %s\n", e.what());
+    std::fprintf(stderr, "ULog exception: %s\n", e.what());
+    return 1;
   }
 
   return 0;
