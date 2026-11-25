@@ -33,8 +33,26 @@ The CLI, library, and default CLI tests build without external dependencies. Set
 In the topic listing, `sensor_combined (0)   -  1298` means instance 0 has 1,298 samples.
 Parsing warnings go to standard error. A fatal parse error or an unreadable file produces a
 nonzero exit status. The CLI keeps samples in memory while it builds the report. The C++
-reader can process chunks incrementally for large logs. Logs with appended data segments
+reader can process chunks incrementally for large logs. Call `Reader::finish()` after the last
+chunk to report incomplete input. Logs with appended data segments
 may yield partial results.
+
+Add `--json` before the path to produce one machine-readable diagnostics report.
+Schema version 1 reports `status`, parsing `diagnostics`, `dropouts` with a
+count and total duration in milliseconds, and `topics` with each name, instance
+and sample count. Status is `ok` for a log accepted without diagnostics,
+`warning` for recoverable parsing problems, and `error` for an unreadable log
+or fatal parsing failure. Both successful statuses exit with code 0. Errors
+still produce a JSON report and exit with code 1.
+
+Use `--parameter-changes` to inspect parameter updates recorded during the flight:
+
+```sh
+./install/bin/flight-log-inspector --parameter-changes tests/log_files/sample.ulg
+```
+
+The report lists updates in recording order, including repeated values. The command keeps
+parameter updates and header information in memory while skipping storage of topic samples.
 
 ## C++ library
 
@@ -47,6 +65,20 @@ target_link_libraries(my_tool PRIVATE flight_log::flight_log)
 
 Public headers are under `flight_log/`. The [examples](examples/) show typed sample access,
 streaming reads, and file writing.
+
+## Export topic samples
+
+```sh
+./install/bin/flight-log-inspector export-topic tests/log_files/sample_log_small.ulg sensor_combined \
+  --start-us 20488019 --end-us 20492907 > sensor_combined.csv
+```
+
+The command writes CSV to standard output in recorded sample order. The bounds are inclusive
+and use raw log timestamps in microseconds. Omit either bound to leave that end open. Use
+`--instance N` to select a topic instance. Instance 0 is the default. The CSV header lists
+fields in schema order, with indexed columns for arrays, dotted names for nested fields, and
+one text column for each character array. Padding fields are omitted. A window without samples
+still writes the header.
 
 ## Contributing and license
 
