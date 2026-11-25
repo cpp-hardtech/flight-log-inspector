@@ -64,6 +64,7 @@ Use `diff-params` to compare the configuration recorded at the start of each fli
 added and removed parameters, value changes, and type changes in parameter-name order. It
 compares values as stored and prints floating-point values with round-trip precision. A
 successful comparison exits with status 0 whether or not there are differences.
+An input or report output error exits with status 1.
 
 ## Summary for large logs
 
@@ -89,8 +90,8 @@ inclusive and requires the named topic instance to be present. Use `--instance N
 `--min-samples` to select an instance from 0 through 255. Instance 0 is the default.
 
 The command reports the observed value and configured threshold for each check. Exit status
-0 means all checks passed, 3 means a policy failed, 2 means invalid arguments, and 1 means the
-recording could not be checked due to a file or parsing error or warning.
+0 means all checks passed, 3 means a policy failed, and 2 means invalid arguments.
+Status 1 indicates a file error, a parsing error or warning, or a report write failure.
 
 ## C++ library
 

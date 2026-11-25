@@ -24,3 +24,12 @@ execute_process(COMMAND "${CLI}" diff-params "${after}" "${after}"
 if(NOT status STREQUAL "0" OR NOT output STREQUAL "No initial parameter differences.\n")
   message(FATAL_ERROR "Identical logs reported differences (exit ${status})\n${error}")
 endif()
+
+if(EXISTS "/dev/full")
+  execute_process(COMMAND "${CLI}" diff-params "${after}" "${after}"
+    RESULT_VARIABLE status OUTPUT_FILE "/dev/full" ERROR_VARIABLE error
+  )
+  if(NOT status STREQUAL "1" OR NOT error MATCHES "Cannot write parameter diff")
+    message(FATAL_ERROR "Expected a diff-params output error, got ${status}\n${error}")
+  endif()
+endif()
