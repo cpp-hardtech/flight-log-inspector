@@ -216,6 +216,12 @@ void Reader::finish()
     }
     if (_partial_message_buffer_length > 0 && !_need_recovery) {
       _data_handler_interface->error("Truncated message at end of log", true);
+    } else if (previous_state == State::ReadHeader && !_need_recovery) {
+      try {
+        _data_handler_interface->headerComplete();
+      } catch (const ParsingException&) {
+        corruptionDetected();
+      }
     }
   }
   _partial_message_buffer_length = 0;

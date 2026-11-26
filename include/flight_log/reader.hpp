@@ -28,6 +28,7 @@ class Reader {
 
   /**
    * Signal the end of the input, reporting an incomplete file header or final message.
+   * If the log ends after complete definition records, this also completes the header.
    * Further reads and repeated calls to finish() are ignored.
    */
   void finish();
