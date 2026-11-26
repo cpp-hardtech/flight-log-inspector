@@ -655,6 +655,77 @@ TEST_CASE("ULog parsing - finishing rejects an incomplete flag record")
   CHECK_EQ(collector->parsingErrors().size(), 1);
 }
 
+TEST_CASE("ULog parsing - finishing resolves complete definitions without samples")
+{
+  class DefinitionCollector : public flight_log::DataContainer {
+   public:
+    DefinitionCollector() : DataContainer(StorageConfig::FullLog) {}
+
+    void headerComplete() override
+    {
+      ++completions;
+      DataContainer::headerComplete();
+    }
+
+    int completions{0};
+  };
+
+  std::vector<uint8_t> records;
+  flight_log::Writer writer([&records](const uint8_t* chunk, int size) {
+    records.insert(records.end(), chunk, chunk + size);
+  });
+  writer.fileHeader(flight_log::FileHeader(42));
+  writer.messageFormat(
+      flight_log::MessageFormat{"outer", {{"uint64_t", "timestamp"}, {"inner", "detail"}}});
+  const auto outer_end = static_cast<int>(records.size());
+  writer.messageFormat(flight_log::MessageFormat{"inner", {{"uint32_t", "value"}}});
+  writer.headerComplete();
+
+  const auto collector = std::make_shared<DefinitionCollector>();
+  flight_log::Reader reader{collector};
+
+  SUBCASE("complete definitions are finalized once")
+  {
+    reader.readChunk(records.data(), static_cast<int>(records.size()));
+    CHECK_FALSE(collector->isHeaderComplete());
+    CHECK_EQ(collector->completions, 0);
+
+    reader.finish();
+    reader.finish();
+
+    CHECK(collector->isHeaderComplete());
+    CHECK_EQ(collector->completions, 1);
+    CHECK(collector->parsingErrors().empty());
+    CHECK(collector->subscriptionsByMessageId().empty());
+    const auto detail = collector->messageFormats().at("outer")->field("detail");
+    REQUIRE(detail->definitionResolved());
+    CHECK_EQ(detail->offsetInMessage(), 8);
+    CHECK_EQ(detail->nestedField("value")->offsetInMessage(), 0);
+  }
+
+  SUBCASE("a truncated final definition is reported without completing the header")
+  {
+    reader.readChunk(records.data(), static_cast<int>(records.size()) - 1);
+    reader.finish();
+
+    CHECK_FALSE(collector->isHeaderComplete());
+    CHECK_EQ(collector->completions, 0);
+    CHECK_FALSE(collector->hadFatalError());
+    REQUIRE_EQ(collector->parsingErrors().size(), 1);
+    CHECK_EQ(collector->parsingErrors().front(), "Truncated message at end of log");
+  }
+
+  SUBCASE("an unresolved nested format is reported without throwing")
+  {
+    reader.readChunk(records.data(), outer_end);
+    CHECK_NOTHROW(reader.finish());
+
+    CHECK_FALSE(collector->isHeaderComplete());
+    CHECK_FALSE(collector->hadFatalError());
+    CHECK_EQ(collector->parsingErrors().size(), 1);
+  }
+}
+
 TEST_CASE("ULog parsing - finishing reports and discards an incomplete final sample")
 {
   flight_log::Data first{0, {}};
