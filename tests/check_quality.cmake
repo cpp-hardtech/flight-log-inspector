@@ -48,3 +48,15 @@ check_quality(1 missing.ulg --max-dropout-ms 30)
 if(NOT report MATCHES "Cannot open log")
   message(FATAL_ERROR "Expected a file error for a missing recording\n${report}")
 endif()
+
+if(EXISTS "/dev/full")
+  foreach(minimum IN ITEMS 1298 1299)
+    execute_process(COMMAND "${CLI}" check "${LOG_DIR}/${small}"
+      --min-samples sensor_combined ${minimum}
+      RESULT_VARIABLE status OUTPUT_FILE "/dev/full" ERROR_VARIABLE error
+    )
+    if(NOT status STREQUAL "1" OR NOT error MATCHES "Cannot write quality report")
+      message(FATAL_ERROR "Expected a check output error for minimum ${minimum}, got ${status}\n${error}")
+    endif()
+  endforeach()
+endif()

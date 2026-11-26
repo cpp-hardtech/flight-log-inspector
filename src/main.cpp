@@ -240,6 +240,15 @@ int reportInputError(const char* description, const char* path, bool json)
   return 1;
 }
 
+int finishReport(int status, const char* subject, const char* description)
+{
+  if (std::fflush(stdout) != 0 || std::ferror(stdout)) {
+    std::fprintf(stderr, "%s: Cannot write %s\n", subject, description);
+    return 1;
+  }
+  return status;
+}
+
 using StorageConfig = flight_log::DataContainer::StorageConfig;
 
 class ParameterUpdateContainer final : public flight_log::DataContainer {
@@ -717,7 +726,7 @@ int main(int argc, char** argv)
         std::fputs(usage, stderr);
         return 2;
       }
-      return checkQuality(argv[2], *policy);
+      return finishReport(checkQuality(argv[2], *policy), argv[2], "quality report");
     } catch (const std::exception& error) {
       std::fprintf(stderr, "%s: %s\n", argv[2], error.what());
       return 1;
@@ -729,7 +738,7 @@ int main(int argc, char** argv)
       return 2;
     }
     try {
-      return compareParameters(argv[2], argv[3]);
+      return finishReport(compareParameters(argv[2], argv[3]), "diff-params", "parameter diff");
     } catch (const std::exception& error) {
       std::fprintf(stderr, "diff-params: %s\n", error.what());
       return 1;
@@ -761,13 +770,8 @@ int main(int argc, char** argv)
   }
   const char* path = argv[has_mode ? 2 : 1];
   try {
-    const int status = inspectLog(path, json, summary_only, parameter_changes);
-    if (std::fflush(stdout) != 0 || std::ferror(stdout)) {
-      std::fprintf(stderr, "%s: Cannot write %s\n", path,
-                   parameter_changes ? "parameter updates" : "log report");
-      return 1;
-    }
-    return status;
+    return finishReport(inspectLog(path, json, summary_only, parameter_changes), path,
+                        parameter_changes ? "parameter updates" : "log report");
   } catch (const std::exception& error) {
     if (json) {
       writeJsonReport(std::cout, nullptr, error.what());
