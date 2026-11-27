@@ -537,8 +537,22 @@ int inspectLog(const char* path, bool json, bool summary_only, bool parameter_ch
 
   // Parameters
   printf("Default Params:\n");
-  for (const auto& default_param : data_container->defaultParameters()) {
-    print_value(default_param.second.field().name(), default_param.second.value());
+  using DefaultType = flight_log::ulog_parameter_default_type_t;
+  for (const auto& [type, parameters] : data_container->defaultParametersByType()) {
+    switch (type) {
+      case DefaultType::system:
+        printf(" [system]\n");
+        break;
+      case DefaultType::current_setup:
+        printf(" [current setup]\n");
+        break;
+      default:
+        printf(" [category %u]\n", static_cast<unsigned int>(type));
+        break;
+    }
+    for (const auto& [name, parameter] : parameters) {
+      print_value(name, parameter.value());
+    }
   }
   printf("Initial Params:\n");
   for (const auto& initial_param : data_container->initialParameters()) {

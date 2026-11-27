@@ -39,6 +39,27 @@ add_test(NAME cli-parameter-changes COMMAND ${CMAKE_COMMAND}
   -DLOG_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/log_files
   -P ${CMAKE_CURRENT_SOURCE_DIR}/check_parameter_changes.cmake
 )
+
+# Writer-generated fixture with a setup default updated after the definitions,
+# a default shared by both categories, and a distinct initial parameter.
+set(default_categories_expected [=[Default Params:
+ [system]
+ SAMPLE_RATE: 50
+ SAMPLE_WINDOW: 20
+ [current setup]
+ SAMPLE_RATE: 125
+ SAMPLE_WINDOW: 20
+Initial Params:
+ SAMPLE_RATE: 75
+]=])
+add_test(NAME cli-default-parameter-categories COMMAND ${CMAKE_COMMAND}
+  -DCLI=$<TARGET_FILE:flight-log-inspector>
+  -DARGUMENT=${CMAKE_CURRENT_SOURCE_DIR}/log_files/default_categories.ulg
+  -DEXPECTED_STATUS=0 -DEXPECT_QUIET_STDERR=ON
+  "-DEXPECTED_OUTPUT=${default_categories_expected}"
+  -P ${cli_tests}
+)
+
 add_test(NAME cli-empty-input COMMAND ${CMAKE_COMMAND}
   -DCLI=$<TARGET_FILE:flight-log-inspector> -DARGUMENT=${empty_log}
   -DEXPECTED_STATUS=1 "-DEXPECTED_ERROR=Not enough data to read file magic"

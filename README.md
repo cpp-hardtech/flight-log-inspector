@@ -37,6 +37,9 @@ reader can process chunks incrementally for large logs. Call `Reader::finish()` 
 chunk to report incomplete input. Logs with appended data segments
 may yield partial results.
 
+The text report groups default parameters by category. The latest logged value for each
+parameter appears under its system or current setup category, separately from initial values.
+
 Add `--json` before the path to produce one machine-readable diagnostics report.
 Schema version 1 reports `status`, parsing `diagnostics`, `dropouts` with a
 count and total duration in milliseconds, and `topics` with each name, instance
