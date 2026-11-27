@@ -125,4 +125,4 @@ still writes the header.
 ## Contributing and license
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The project is distributed under the BSD 3-Clause
-License in [LICENSE](LICENSE). Source and fixture attribution are recorded in [NOTICE](NOTICE).
+License in [LICENSE](LICENSE).
