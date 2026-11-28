@@ -80,6 +80,9 @@ It keeps one sample counter per observed subscription and tracks dropout counts 
 Memory use also includes message formats, topic definitions, header metadata, parameter
 defaults, and parsing diagnostics.
 
+Combine `--summary-only` and `--json` in either order to emit the summary using JSON
+schema version 1. Counts and diagnostics use the same parsing behavior as the text summary.
+
 ## Check a recording in CI
 
 ```sh
