@@ -26,3 +26,9 @@ jobs:
         run: cmake --build build --parallel 2
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Test installation
+        run: |
+          prefix="$RUNNER_TEMP/flight-log-install"
+          cmake --install build --prefix "$prefix"
+          test -s "$prefix/share/doc/flight-log-inspector/LICENSE"
+          "$prefix/bin/flight-log-inspector" --summary-only tests/log_files/sample_log_small.ulg > /dev/null

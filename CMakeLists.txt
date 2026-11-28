@@ -59,4 +59,4 @@ install(FILES
   ${CMAKE_CURRENT_BINARY_DIR}/flight_logConfigVersion.cmake
   DESTINATION ${flight_log_cmake_dir}
 )
-install(FILES LICENSE NOTICE DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/flight-log-inspector)
+install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/flight-log-inspector)
