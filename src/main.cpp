@@ -115,13 +115,18 @@ void printDropouts(uint64_t count, uint64_t duration_ms)
   printf("Dropouts: %" PRIu64 ", total duration: %" PRIu64 " ms\n", count, duration_ms);
 }
 
+uint64_t topicSampleCount(const flight_log::Subscription& subscription, const SummaryData* summary)
+{
+  return summary ? summary->sampleCount(subscription.getAddLoggedMessage().msgId())
+                 : subscription.size();
+}
+
 void printTopicCounts(flight_log::DataContainer& data, const SummaryData* summary = nullptr)
 {
   printf("\nName (multi id)  - number of data points\n");
   for (const auto& item : data.subscriptionsByNameAndMultiId()) {
     const auto& subscription = *item.second;
-    const uint64_t count = summary ? summary->sampleCount(subscription.getAddLoggedMessage().msgId())
-                                   : subscription.size();
+    const auto count = topicSampleCount(subscription, summary);
     printf(" %s (%i)   -  %" PRIu64 "\n", item.first.name.c_str(), item.first.multi_id, count);
   }
 }
@@ -191,7 +196,7 @@ void writeJsonString(std::ostream& output, std::string_view text)
 }
 
 void writeJsonReport(std::ostream& output, flight_log::DataContainer* data,
-                     std::string_view input_error = {})
+                     std::string_view input_error = {}, const SummaryData* summary = nullptr)
 {
   const bool failed = data == nullptr || data->hadFatalError();
   const char* status = "error";
@@ -215,8 +220,10 @@ void writeJsonReport(std::ostream& output, flight_log::DataContainer* data,
     return;
   }
 
-  output << "],\"dropouts\":{\"count\":" << data->dropouts().size()
-         << ",\"total_duration_ms\":" << totalDropoutDuration(*data) << "},\"topics\":[";
+  const auto dropouts = summary ? summary->dropoutCount() : data->dropouts().size();
+  const auto duration = summary ? summary->totalDropoutMs() : totalDropoutDuration(*data);
+  output << "],\"dropouts\":{\"count\":" << dropouts
+         << ",\"total_duration_ms\":" << duration << "},\"topics\":[";
   bool first_topic = true;
   for (const auto& [key, subscription] : data->subscriptionsByNameAndMultiId()) {
     if (!first_topic) {
@@ -225,7 +232,8 @@ void writeJsonReport(std::ostream& output, flight_log::DataContainer* data,
     first_topic = false;
     output << "{\"name\":";
     writeJsonString(output, key.name);
-    output << ",\"instance\":" << key.multi_id << ",\"samples\":" << subscription->size() << '}';
+    output << ",\"instance\":" << key.multi_id
+           << ",\"samples\":" << topicSampleCount(*subscription, summary) << '}';
   }
   output << "]}\n";
 }
@@ -441,7 +449,7 @@ int inspectLog(const char* path, bool json, bool summary_only, bool parameter_ch
   const auto summary = summary_only ? std::make_shared<SummaryData>() : nullptr;
   std::shared_ptr<flight_log::DataContainer> data_container;
   if (summary) {
-    data_container = readLog(path, summary, false);
+    data_container = readLog(path, summary, json);
   } else if (parameter_changes) {
     data_container = readLog(path, std::make_shared<ParameterUpdateContainer>(), false);
   } else {
@@ -451,7 +459,7 @@ int inspectLog(const char* path, bool json, bool summary_only, bool parameter_ch
     return 1;
   }
   if (json) {
-    writeJsonReport(std::cout, data_container.get());
+    writeJsonReport(std::cout, data_container.get(), {}, summary.get());
     return data_container->hadFatalError() ? 1 : 0;
   }
 
@@ -722,7 +730,7 @@ int exportTopic(const char* path, const char* topic, const ExportOptions& option
 
 int main(int argc, char** argv)
 {
-  constexpr auto usage = "Usage: flight-log-inspector [--json|--summary-only] <file.ulg>\n"
+  constexpr auto usage = "Usage: flight-log-inspector [--json] [--summary-only] <file.ulg>\n"
                          "       flight-log-inspector --parameter-changes <file.ulg>\n"
                          "       flight-log-inspector export-topic <file.ulg> <topic>\n"
                          "         [--instance N] [--start-us N] [--end-us N]\n"
@@ -774,15 +782,20 @@ int main(int argc, char** argv)
       return 1;
     }
   }
-  const bool json = argc > 1 && std::string_view(argv[1]) == "--json";
-  const bool parameter_changes = argc > 1 && std::string_view(argv[1]) == "--parameter-changes";
-  const bool summary_only = argc > 1 && std::string_view(argv[1]) == "--summary-only";
+  const std::string_view first = argc > 1 ? argv[1] : "";
+  const std::string_view second = argc > 2 ? argv[2] : "";
+  const bool json_summary = (first == "--json" && second == "--summary-only") ||
+                            (first == "--summary-only" && second == "--json");
+  const bool json = json_summary || first == "--json";
+  const bool summary_only = json_summary || first == "--summary-only";
+  const bool parameter_changes = first == "--parameter-changes";
   const bool has_mode = json || parameter_changes || summary_only;
-  if (argc != (has_mode ? 3 : 2)) {
+  const int path_index = json_summary ? 3 : (has_mode ? 2 : 1);
+  if (argc != path_index + 1) {
     std::fputs(usage, stderr);
     return 2;
   }
-  const char* path = argv[has_mode ? 2 : 1];
+  const char* path = argv[path_index];
   try {
     return finishReport(inspectLog(path, json, summary_only, parameter_changes), path,
                         parameter_changes ? "parameter updates" : "log report");
